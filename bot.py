@@ -465,24 +465,21 @@ async def refresh_commands(interaction: discord.Interaction) -> None:
     try:
         await interaction.response.defer(ephemeral=True)
 
-        # Force clear ALL commands everywhere first
-        tree.clear_commands(guild=None)  # Clear global commands
+        # Clear commands from the specific guild first
         if GUILD_ID_ENV:
             test_guild = discord.Object(id=int(GUILD_ID_ENV))
-            tree.clear_commands(guild=test_guild)  # Clear guild commands too
-
-        # Now sync everything fresh
-        await tree.sync()  # Sync global commands
-
-        if GUILD_ID_ENV:
-            await tree.sync(guild=test_guild)  # Sync guild commands
+            tree.clear_commands(guild=test_guild)
+            await tree.sync(guild=test_guild)
             await interaction.followup.send(
-                f"ALL commands cleared and refreshed globally and on guild {GUILD_ID_ENV}!",
+                f"Commands cleared and refreshed on guild {GUILD_ID_ENV}!",
                 ephemeral=True,
             )
         else:
+            # Clear global commands
+            tree.clear_commands(guild=None)
+            await tree.sync()
             await interaction.followup.send(
-                "ALL commands cleared and refreshed globally! (May take up to 1 hour)",
+                "Commands cleared and refreshed globally! (May take up to 1 hour)",
                 ephemeral=True,
             )
 
@@ -503,14 +500,11 @@ async def on_ready() -> None:
             test_guild = discord.Object(id=int(GUILD_ID_ENV))
             print(f"Created guild object: {test_guild}")
 
-            # When testing with guild ID, sync both global and guild commands
-            print("Syncing global commands...")
-            await tree.sync()  # Sync global commands first
-            print("Global commands synced successfully!")
-
-            print("Syncing guild commands...")
-            await tree.sync(guild=test_guild)  # Then sync to specific guild
-            print(f"Slash commands synced globally and to guild {GUILD_ID_ENV}.")
+            # For development/testing, only sync to the specific guild
+            # This prevents duplicate commands from appearing
+            print("Syncing guild commands only...")
+            await tree.sync(guild=test_guild)
+            print(f"Slash commands synced to guild {GUILD_ID_ENV}.")
         else:
             print("No GUILD_ID_ENV set, syncing globally only...")
             # Production mode: sync globally only
