@@ -70,7 +70,7 @@ GEMINI_CLIENT = genai.Client() if os.getenv("GEMINI_API_KEY") else None
 
 # Rate limiting for ask command: user_id -> last_used_timestamp
 ASK_COMMAND_COOLDOWNS: Dict[int, datetime.datetime] = {}
-ASK_COMMAND_COOLDOWN_HOURS = 1  # 1 hour cooldown
+ASK_COMMAND_COOLDOWN_MINUTES = 30  # 30 minutes cooldown
 
 
 def cleanup_expired_cooldowns() -> None:
@@ -80,9 +80,9 @@ def cleanup_expired_cooldowns() -> None:
 
     for user_id, last_used in ASK_COMMAND_COOLDOWNS.items():
         time_diff = current_time - last_used
-        hours_passed = time_diff.total_seconds() / 3600
+        minutes_passed = time_diff.total_seconds() / 60
 
-        if hours_passed >= ASK_COMMAND_COOLDOWN_HOURS:
+        if minutes_passed >= ASK_COMMAND_COOLDOWN_MINUTES:
             expired_users.append(user_id)
 
     for user_id in expired_users:
@@ -178,13 +178,12 @@ async def ask_command(interaction: discord.Interaction, question: str) -> None:
         if user_id in ASK_COMMAND_COOLDOWNS:
             last_used = ASK_COMMAND_COOLDOWNS[user_id]
             time_diff = current_time - last_used
-            hours_passed = time_diff.total_seconds() / 3600
+            minutes_passed = time_diff.total_seconds() / 60
 
-            if hours_passed < ASK_COMMAND_COOLDOWN_HOURS:
-                remaining_hours = ASK_COMMAND_COOLDOWN_HOURS - hours_passed
-                remaining_minutes = int(remaining_hours * 60)
+            if minutes_passed < ASK_COMMAND_COOLDOWN_MINUTES:
+                remaining_minutes = int(ASK_COMMAND_COOLDOWN_MINUTES - minutes_passed)
                 await interaction.response.send_message(
-                    f"⏰ Rate limit: You can only ask questions once per hour. Please wait {remaining_minutes} more minutes.",
+                    f"⏰ Rate limit: You can only ask questions once every {ASK_COMMAND_COOLDOWN_MINUTES} minutes. Please wait {remaining_minutes} more minutes.",
                     ephemeral=True,
                 )
                 return
