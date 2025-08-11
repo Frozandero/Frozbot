@@ -73,7 +73,6 @@ tree = app_commands.CommandTree(client)
 @tree.command(
     name="iq",
     description="Get your (fake) IQ, deterministically calculated from your account.",
-    guild=GUILD_ID_IF_PRESENT,
 )
 async def iq_command(
     interaction: discord.Interaction, user: Optional[discord.Member] = None
@@ -144,10 +143,12 @@ async def on_ready() -> None:
     try:
         if GUILD_ID_ENV:
             test_guild = discord.Object(id=int(GUILD_ID_ENV))
-            # Sync commands to the specific guild for instant availability
-            await tree.sync(guild=test_guild)
-            print(f"Slash commands synced to guild {GUILD_ID_ENV}.")
+            # When testing with guild ID, sync both global and guild commands
+            await tree.sync()  # Sync global commands first
+            await tree.sync(guild=test_guild)  # Then sync to specific guild
+            print(f"Slash commands synced globally and to guild {GUILD_ID_ENV}.")
         else:
+            # Production mode: sync globally only
             await tree.sync()
             print("Slash commands synced globally (may take up to 1 hour to appear).")
     except Exception as sync_error:
