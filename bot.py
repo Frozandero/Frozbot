@@ -2,7 +2,7 @@ import os
 import hashlib
 import random
 import datetime
-from typing import Optional
+from typing import Optional, Dict
 
 import discord
 from discord import app_commands
@@ -68,6 +68,27 @@ IS_DEV_SERVER_COMMAND: Optional[discord.Object] = (
 
 GEMINI_CLIENT = genai.Client() if os.getenv("GEMINI_API_KEY") else None
 
+# Rate limiting for ask command: user_id -> last_used_timestamp
+ASK_COMMAND_COOLDOWNS: Dict[int, datetime.datetime] = {}
+ASK_COMMAND_COOLDOWN_HOURS = 1  # 1 hour cooldown
+
+
+def cleanup_expired_cooldowns() -> None:
+    """Remove expired cooldown entries to prevent memory bloat."""
+    current_time = datetime.datetime.now()
+    expired_users = []
+
+    for user_id, last_used in ASK_COMMAND_COOLDOWNS.items():
+        time_diff = current_time - last_used
+        hours_passed = time_diff.total_seconds() / 3600
+
+        if hours_passed >= ASK_COMMAND_COOLDOWN_HOURS:
+            expired_users.append(user_id)
+
+    for user_id in expired_users:
+        del ASK_COMMAND_COOLDOWNS[user_id]
+
+
 intents = discord.Intents.default()
 intents.message_content = True
 client = discord.Client(intents=intents)
@@ -100,6 +121,34 @@ async def iq_command(
 
 @tree.command(name="ask", description="Ask the bot a question.")
 async def ask_command(interaction: discord.Interaction, question: str) -> None:
+    # Rate limiting check (owner bypass)
+    owner_id = int(os.getenv("OWNER_ID", "0"))
+    user_id = interaction.user.id
+
+    if user_id != owner_id:  # Not the owner, check rate limit
+        current_time = datetime.datetime.now()
+
+        if user_id in ASK_COMMAND_COOLDOWNS:
+            last_used = ASK_COMMAND_COOLDOWNS[user_id]
+            time_diff = current_time - last_used
+            hours_passed = time_diff.total_seconds() / 3600
+
+            if hours_passed < ASK_COMMAND_COOLDOWN_HOURS:
+                remaining_hours = ASK_COMMAND_COOLDOWN_HOURS - hours_passed
+                remaining_minutes = int(remaining_hours * 60)
+                await interaction.response.send_message(
+                    f"⏰ Rate limit: You can only ask questions once per hour. Please wait {remaining_minutes} more minutes.",
+                    ephemeral=True,
+                )
+                return
+
+        # Update cooldown timestamp
+        ASK_COMMAND_COOLDOWNS[user_id] = current_time
+
+    # Cleanup expired cooldowns occasionally (every 10th request)
+    if len(ASK_COMMAND_COOLDOWNS) > 100:  # Only cleanup when we have many entries
+        cleanup_expired_cooldowns()
+
     if not GEMINI_CLIENT:
         await interaction.response.send_message(
             "The bot is not configured to use Gemini AI. Please contact the server owner.",
