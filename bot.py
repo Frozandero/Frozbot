@@ -52,6 +52,18 @@ load_dotenv()
 TOKEN: Optional[str] = os.getenv("DISCORD_BOT_TOKEN")
 GUILD_ID_ENV: Optional[str] = os.getenv("DISCORD_GUILD_ID")
 
+GUILD_ID_IF_PRESENT: Optional[discord.Object] = (
+    discord.Object(id=int(os.getenv("DEV_SERVER_ID", "0")))
+    if os.getenv("DEV_SERVER_ID")
+    else None
+)
+
+IS_DEV_SERVER_COMMAND: Optional[discord.Object] = (
+    discord.Object(id=int(os.getenv("DEV_SERVER_ID", "0")))
+    if os.getenv("DEV_SERVER_ID")
+    else None
+)
+
 intents = discord.Intents.default()
 intents.message_content = True
 client = discord.Client(intents=intents)
@@ -61,6 +73,7 @@ tree = app_commands.CommandTree(client)
 @tree.command(
     name="iq",
     description="Get your (fake) IQ, deterministically calculated from your account.",
+    guild=GUILD_ID_IF_PRESENT,
 )
 async def iq_command(
     interaction: discord.Interaction, user: Optional[discord.Member] = None
@@ -86,11 +99,7 @@ async def iq_command(
 @tree.command(
     name="refresh",
     description="[Dev Only] Refresh slash commands on the server.",
-    guild=(
-        discord.Object(id=int(os.getenv("DEV_SERVER_ID", "0")))
-        if os.getenv("DEV_SERVER_ID")
-        else None
-    ),
+    guild=IS_DEV_SERVER_COMMAND,
 )
 async def refresh_commands(interaction: discord.Interaction) -> None:
     # Check if the user is the bot owner (you)
