@@ -104,13 +104,20 @@ async def try_gemini_models(question: str, context_string: str) -> Optional[str]
         "gemini-2.5-flash-lite",  # Basic quality, highest quota
     ]
 
-    for i, model_name in enumerate(models_to_try):
+    thinking_budgets = [-1, -1, 0]
+
+    for i, (model_name, thinking_budget) in enumerate(
+        zip(models_to_try, thinking_budgets)
+    ):
         try:
             print(f"🔄 Trying model: {model_name} (attempt {i+1}/{len(models_to_try)})")
             response = GEMINI_CLIENT.models.generate_content(
                 model=model_name,
                 config=types.GenerateContentConfig(
                     system_instruction=context_string,  # type: ignore
+                    thinking_config=types.ThinkingConfig(
+                        thinking_budget=thinking_budget
+                    ),
                 ),
                 contents=question,
             )
