@@ -98,11 +98,7 @@ async def iq_command(
         )
 
 
-@tree.command(
-    name="ask",
-    description="Ask the bot a question.",
-    guild=discord.Object(id=int(os.getenv("DEV_SERVER_ID", "0"))),
-)
+@tree.command(name="ask", description="Ask the bot a question.")
 async def ask_command(interaction: discord.Interaction, question: str) -> None:
     if not GEMINI_CLIENT:
         await interaction.response.send_message(
