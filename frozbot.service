@@ -1,0 +1,17 @@
+[Unit]
+Description=FrozBot Discord Bot
+After=network.target
+
+[Service]
+Type=simple
+User=YOUR_USERNAME
+WorkingDirectory=/path/to/your/frozbot
+Environment=PATH=/path/to/your/frozbot/.venv/bin
+ExecStart=/path/to/your/frozbot/.venv/bin/python bot.py
+Restart=always
+RestartSec=10
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target
