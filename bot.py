@@ -385,7 +385,7 @@ async def ask_command(interaction: discord.Interaction, question: str) -> None:
             contents=question,
         )
         # Send response to user with formatted question and reply
-        formatted_response = f"**{interaction.user.display_name} asked:** {question}\n\n**Answer:** {response.text}"
+        formatted_response = f"**Question:** {question}\n\n**Answer:** {response.text}"
         await interaction.edit_original_response(content=formatted_response)  # type: ignore
 
     except Exception as e:
