@@ -141,20 +141,33 @@ async def refresh_commands(interaction: discord.Interaction) -> None:
 @client.event
 async def on_ready() -> None:
     print(f"Logged in as {client.user} (ID: {client.user.id})")  # type: ignore
+    print("Bot is ready! Starting command sync...")
 
     try:
         if GUILD_ID_ENV:
+            print(f"GUILD_ID_ENV is set to: {GUILD_ID_ENV}")
             test_guild = discord.Object(id=int(GUILD_ID_ENV))
+            print(f"Created guild object: {test_guild}")
+
             # When testing with guild ID, sync both global and guild commands
+            print("Syncing global commands...")
             await tree.sync()  # Sync global commands first
+            print("Global commands synced successfully!")
+
+            print("Syncing guild commands...")
             await tree.sync(guild=test_guild)  # Then sync to specific guild
             print(f"Slash commands synced globally and to guild {GUILD_ID_ENV}.")
         else:
+            print("No GUILD_ID_ENV set, syncing globally only...")
             # Production mode: sync globally only
             await tree.sync()
             print("Slash commands synced globally (may take up to 1 hour to appear).")
     except Exception as sync_error:
         print(f"Failed to sync commands: {sync_error}")
+        print(f"Error type: {type(sync_error)}")
+        import traceback
+
+        traceback.print_exc()
         print(
             "Make sure your bot has the 'applications.commands' scope and proper permissions."
         )
