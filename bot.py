@@ -111,22 +111,24 @@ async def refresh_commands(interaction: discord.Interaction) -> None:
     try:
         await interaction.response.defer(ephemeral=True)
 
-        # Clear and sync global commands (like /iq) first
-        tree.clear_commands(guild=None)
-        await tree.sync()
-
-        # Then sync guild-specific commands (like /refresh) to the dev server
+        # Force clear ALL commands everywhere first
+        tree.clear_commands(guild=None)  # Clear global commands
         if GUILD_ID_ENV:
             test_guild = discord.Object(id=int(GUILD_ID_ENV))
-            # Don't clear guild commands, just sync them
-            await tree.sync(guild=test_guild)
+            tree.clear_commands(guild=test_guild)  # Clear guild commands too
+
+        # Now sync everything fresh
+        await tree.sync()  # Sync global commands
+
+        if GUILD_ID_ENV:
+            await tree.sync(guild=test_guild)  # Sync guild commands
             await interaction.followup.send(
-                f"Commands refreshed globally and synced to guild {GUILD_ID_ENV}!",
+                f"ALL commands cleared and refreshed globally and on guild {GUILD_ID_ENV}!",
                 ephemeral=True,
             )
         else:
             await interaction.followup.send(
-                "Commands refreshed globally! (May take up to 1 hour)",
+                "ALL commands cleared and refreshed globally! (May take up to 1 hour)",
                 ephemeral=True,
             )
 
