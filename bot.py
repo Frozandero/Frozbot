@@ -76,7 +76,7 @@ tree = app_commands.CommandTree(client)
 
 @tree.command(
     name="iq",
-    description="Get your (fake) IQ, deterministically calculated from your account.",
+    description="Get the IQ of a user.",
 )
 async def iq_command(
     interaction: discord.Interaction, user: Optional[discord.Member] = None
