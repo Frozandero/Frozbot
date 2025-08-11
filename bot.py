@@ -120,66 +120,92 @@ async def ask_command(interaction: discord.Interaction, question: str) -> None:
     # Gathering context
     # Gather server context
     server_context = interaction.guild.name if interaction.guild else None
-    # Gather mentioned users context - for slash commands, we can check if there are any user mentions in the question
+    # Gather mentioned users context - for slash commands, parse Discord mention syntax like <@1234567890>
     mentioned_users_context = []
-    # Check if the question contains any user mentions (e.g., @username)
-    if "@" in question:
-        # Extract potential usernames and fetch their server data
-        words = question.split()
-        for word in words:
-            if word.startswith("@"):
-                username = word[1:]  # Remove the @ symbol
-                # Try to find the user in the server
-                if interaction.guild:
-                    # Search by display name first (more common in Discord)
-                    member = interaction.guild.get_member_named(username)
-                    if member:
+    import re
+
+    # Discord mention patterns: <@1234567890> or <@!1234567890> (with ! for nicknames)
+    mention_pattern = r"<@!?(\d+)>"
+    matches = re.findall(mention_pattern, question)
+
+    for user_id_str in matches:
+        try:
+            user_id = int(user_id_str)
+
+            # Try to find the user in the server first
+            if interaction.guild:
+                member = interaction.guild.get_member(user_id)
+                if member:
+                    mentioned_users_context.append(
+                        {
+                            "name": member.display_name,
+                            "username": member.name,
+                            "joined_at": (
+                                member.joined_at.strftime("%Y-%m-%d")
+                                if member.joined_at
+                                else "Unknown"
+                            ),
+                            "roles": (
+                                [role.name for role in member.roles[1:]]
+                                if len(member.roles) > 1
+                                else []
+                            ),  # Skip @everyone role
+                            "top_role": (
+                                member.top_role.name if member.top_role else "No roles"
+                            ),
+                            "nickname": member.nick if member.nick else None,
+                        }
+                    )
+                else:
+                    # User not in server, try to fetch user info
+                    try:
+                        user = await interaction.client.fetch_user(user_id)
                         mentioned_users_context.append(
                             {
-                                "name": member.display_name,
-                                "username": member.name,
-                                "id": member.id,
-                                "joined_at": (
-                                    member.joined_at.strftime("%Y-%m-%d")
-                                    if member.joined_at
+                                "name": user.name,
+                                "username": user.name,
+                                "created_at": (
+                                    user.created_at.strftime("%Y-%m-%d")
+                                    if user.created_at
                                     else "Unknown"
                                 ),
-                                "roles": (
-                                    [role.name for role in member.roles[1:]]
-                                    if len(member.roles) > 1
-                                    else []
-                                ),  # Skip @everyone role
+                                "bot": user.bot,
+                                "note": "User not in this server",
                             }
                         )
-                    else:
-                        # If not found by display name, try to find by username
-                        member = discord.utils.get(
-                            interaction.guild.members, name=username
+                    except discord.NotFound:
+                        mentioned_users_context.append(f"<@{user_id}> (user not found)")
+                    except discord.Forbidden:
+                        mentioned_users_context.append(
+                            f"<@{user_id}> (cannot fetch user info)"
                         )
-                        if member:
-                            mentioned_users_context.append(
-                                {
-                                    "name": member.display_name,
-                                    "username": member.name,
-                                    "joined_at": (
-                                        member.joined_at.strftime("%Y-%m-%d")
-                                        if member.joined_at
-                                        else "Unknown"
-                                    ),
-                                    "roles": (
-                                        [role.name for role in member.roles[1:]]
-                                        if len(member.roles) > 1
-                                        else []
-                                    ),
-                                }
-                            )
-                        else:
-                            # User not found in server
-                            mentioned_users_context.append(
-                                f"@{username} (not found in server)"
-                            )
-                else:
-                    mentioned_users_context.append(f"@{username} (no server context)")
+            else:
+                # No guild context, try to fetch user info
+                try:
+                    user = await interaction.client.fetch_user(user_id)
+                    mentioned_users_context.append(
+                        {
+                            "name": user.name,
+                            "username": user.name,
+                            "created_at": (
+                                user.created_at.strftime("%Y-%m-%d")
+                                if user.created_at
+                                else "Unknown"
+                            ),
+                            "bot": user.bot,
+                            "note": "No server context",
+                        }
+                    )
+                except discord.NotFound:
+                    mentioned_users_context.append(f"<@{user_id}> (user not found)")
+                except discord.Forbidden:
+                    mentioned_users_context.append(
+                        f"<@{user_id}> (cannot fetch user info)"
+                    )
+
+        except ValueError:
+            # Invalid user ID format
+            mentioned_users_context.append(f"Invalid user ID: {user_id_str}")
     # Gather date context with current timestamp
     date_context = datetime.datetime.now().strftime("%Y-%m-%d %H:%M")
     # Gather message context - for slash commands, this is the question parameter
@@ -237,17 +263,35 @@ async def ask_command(interaction: discord.Interaction, question: str) -> None:
             users_info = []
             for user_data in mentioned_users_context:
                 if isinstance(user_data, dict):
-                    roles_str = (
-                        ", ".join(user_data["roles"])
-                        if user_data["roles"]
-                        else "No roles"
+                    user_info_parts = []
+                    user_info_parts.append(
+                        f"- {user_data['name']} (@{user_data['username']})"
                     )
-                    users_info.append(
-                        f"- {user_data['name']} (@{user_data['username']}, ID: {user_data['id']}, Joined: {user_data['joined_at']}, Roles: {roles_str})"
-                    )
+
+                    if "joined_at" in user_data:
+                        user_info_parts.append(
+                            f"  Joined Server: {user_data['joined_at']}"
+                        )
+                    if "created_at" in user_data:
+                        user_info_parts.append(
+                            f"  Account Created: {user_data['created_at']}"
+                        )
+                    if "roles" in user_data and user_data["roles"]:
+                        roles_str = ", ".join(user_data["roles"])
+                        user_info_parts.append(f"  Roles: {roles_str}")
+                    if "top_role" in user_data:
+                        user_info_parts.append(f"  Top Role: {user_data['top_role']}")
+                    if "nickname" in user_data and user_data["nickname"]:
+                        user_info_parts.append(f"  Nickname: {user_data['nickname']}")
+                    if "bot" in user_data:
+                        user_info_parts.append(f"  Bot: {user_data['bot']}")
+                    if "note" in user_data:
+                        user_info_parts.append(f"  Note: {user_data['note']}")
+
+                    users_info.append("\n".join(user_info_parts))
                 else:
                     users_info.append(str(user_data))
-            mentioned_users_str = "\n".join(users_info)
+            mentioned_users_str = "\n\n".join(users_info)
         else:
             mentioned_users_str = ", ".join(mentioned_users_context)
     else:
