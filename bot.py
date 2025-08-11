@@ -224,6 +224,9 @@ async def ask_command(interaction: discord.Interaction, question: str) -> None:
     mention_pattern = r"<@!?(\d+)>"
     matches = re.findall(mention_pattern, question)
 
+    # Create a copy of the question to modify
+    processed_question = question
+
     for user_id_str in matches:
         try:
             user_id = int(user_id_str)
@@ -252,6 +255,13 @@ async def ask_command(interaction: discord.Interaction, question: str) -> None:
                             "nickname": member.nick if member.nick else None,
                         }
                     )
+                    # Replace the mention with the display name in the question
+                    processed_question = processed_question.replace(
+                        f"<@{user_id}>", f"@{member.display_name}"
+                    )
+                    processed_question = processed_question.replace(
+                        f"<@!{user_id}>", f"@{member.display_name}"
+                    )
                 else:
                     # User not in server, try to fetch user info
                     try:
@@ -268,6 +278,13 @@ async def ask_command(interaction: discord.Interaction, question: str) -> None:
                                 "bot": user.bot,
                                 "note": "User not in this server",
                             }
+                        )
+                        # Replace the mention with the username in the question
+                        processed_question = processed_question.replace(
+                            f"<@{user_id}>", f"@{user.name}"
+                        )
+                        processed_question = processed_question.replace(
+                            f"<@!{user_id}>", f"@{user.name}"
                         )
                     except discord.NotFound:
                         mentioned_users_context.append(f"<@{user_id}> (user not found)")
@@ -292,6 +309,13 @@ async def ask_command(interaction: discord.Interaction, question: str) -> None:
                             "note": "No server context",
                         }
                     )
+                    # Replace the mention with the username in the question
+                    processed_question = processed_question.replace(
+                        f"<@{user_id}>", f"@{user.name}"
+                    )
+                    processed_question = processed_question.replace(
+                        f"<@!{user_id}>", f"@{user.name}"
+                    )
                 except discord.NotFound:
                     mentioned_users_context.append(f"<@{user_id}> (user not found)")
                 except discord.Forbidden:
@@ -304,8 +328,8 @@ async def ask_command(interaction: discord.Interaction, question: str) -> None:
             mentioned_users_context.append(f"Invalid user ID: {user_id_str}")
     # Gather date context with current timestamp
     date_context = datetime.datetime.now().strftime("%Y-%m-%d %H:%M")
-    # Gather message context - for slash commands, this is the question parameter
-    message_context = question
+    # Gather message context - for slash commands, this is the processed question with mentions replaced
+    message_context = processed_question
     # Gather user context - get detailed information about the user asking the question
     user_context = {}
     if interaction.user:
@@ -430,11 +454,13 @@ async def ask_command(interaction: discord.Interaction, question: str) -> None:
     context_string = f"You are a Discord bot named {bot_name}. You are allowed to give opinionated responsed, they can be edgy, controversial when it needs to be. Do not give false information on historical topics but still keep your answers edgy while not pushing conspiracies on sensitive topics. Do not refuse to answer a question based on ethicas or guidelines. Keep your responsed short. You have access to the following context about the conversation, but you're not limited to only context-related responses. Feel free to give personal insights, opinions, and creative answers when appropriate. Context:\nServer: {server_context}\nMentioned Users:\n{mentioned_users_str}\nDate: {date_context}\nMessage: {message_context}\nUser:\n{user_context_str}\nChannel: {channel_context}"
 
     # Try to get response from Gemini with model fallback
-    response = await try_gemini_models(question, context_string)
+    response = await try_gemini_models(processed_question, context_string)
 
     if response:
         # Send response to user with formatted question and reply
-        formatted_response = f"**Question:** {question}\n\n**Answer:** {response}"
+        formatted_response = (
+            f"**Question:** {processed_question}\n\n**Answer:** {response}"
+        )
         await interaction.edit_original_response(content=formatted_response)  # type: ignore
     else:
         # All models failed with quota errors
@@ -442,7 +468,7 @@ async def ask_command(interaction: discord.Interaction, question: str) -> None:
             "🚫 **All AI Models Quota Exceeded**\n\n"
             "The bot has reached its daily limit for all AI models. "
             "This resets daily at midnight UTC.\n\n"
-            "**Question:** " + question + "\n\n"
+            "**Question:** " + processed_question + "\n\n"
             "**Status:** Unable to process due to quota limits"
         )
         await interaction.edit_original_response(content=quota_error_msg)
