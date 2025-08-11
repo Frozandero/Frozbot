@@ -152,6 +152,7 @@ tree = app_commands.CommandTree(client)
 @tree.command(
     name="iq",
     description="Get the IQ of a user.",
+    guild=None,
 )
 async def iq_command(
     interaction: discord.Interaction, user: Optional[discord.Member] = None
@@ -173,7 +174,7 @@ async def iq_command(
         )
 
 
-@tree.command(name="ask", description="Ask the bot a question.")
+@tree.command(name="ask", description="Ask the bot a question.", guild=None)
 async def ask_command(interaction: discord.Interaction, question: str) -> None:
     # Rate limiting check (owner bypass)
     owner_id = int(os.getenv("OWNER_ID", "0"))
