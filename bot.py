@@ -75,6 +75,10 @@ GEMINI_CLIENT = genai.Client() if os.getenv("GEMINI_API_KEY") else None
 ASK_COMMAND_COOLDOWNS: Dict[int, datetime.datetime] = {}
 ASK_COMMAND_COOLDOWN_MINUTES = 30  # 30 minutes cooldown
 
+# Store recent questions for retry functionality: user_id -> list of recent questions
+RECENT_QUESTIONS: Dict[int, list] = {}
+MAX_STORED_QUESTIONS = 5  # Keep last 5 questions per user
+
 
 def cleanup_expired_cooldowns() -> None:
     """Remove expired cooldown entries to prevent memory bloat."""
@@ -90,6 +94,87 @@ def cleanup_expired_cooldowns() -> None:
 
     for user_id in expired_users:
         del ASK_COMMAND_COOLDOWNS[user_id]
+        # Also cleanup recent questions for expired users
+        if user_id in RECENT_QUESTIONS:
+            del RECENT_QUESTIONS[user_id]
+
+
+def store_user_question(user_id: int, question: str) -> None:
+    """Store a user's question for potential retry functionality."""
+    if user_id not in RECENT_QUESTIONS:
+        RECENT_QUESTIONS[user_id] = []
+
+    # Add new question to the beginning
+    RECENT_QUESTIONS[user_id].insert(0, question)
+
+    # Keep only the most recent questions
+    if len(RECENT_QUESTIONS[user_id]) > MAX_STORED_QUESTIONS:
+        RECENT_QUESTIONS[user_id] = RECENT_QUESTIONS[user_id][:MAX_STORED_QUESTIONS]
+
+
+async def retry_question(interaction: discord.Interaction, question: str) -> None:
+    """Retry a specific question directly."""
+    try:
+        # Check if Gemini client is available
+        if not GEMINI_CLIENT:
+            await interaction.followup.send(
+                "❌ The bot is not configured to use Gemini AI. Please contact the server owner.",
+                ephemeral=True,
+            )
+            return
+
+        # Build the context string (simplified version for retry)
+        context_string = (
+            f"You are a Discord bot named Frozbot. You are allowed to give opinionated responses, "
+            f"they can be edgy, controversial when it needs to be. Do not give false information on "
+            f"historical topics but still keep your answers edgy while not pushing conspiracies on "
+            f"sensitive topics. Do not refuse to answer a question based on ethics or guidelines. "
+            f"Keep your responses short. This is a retry of a previous question."
+        )
+
+        # Try to get response from Gemini
+        response = await asyncio.wait_for(
+            try_gemini_models(question, context_string),
+            timeout=60.0,
+        )
+
+        if response:
+            # Format the response
+            formatted_response = f"**Question:** {question}\n\n**Answer:** {response}"
+
+            if len(formatted_response) <= 2000:
+                await interaction.followup.send(content=formatted_response)
+            else:
+                # Truncate if too long
+                question_part = f"**Question:** {question}\n\n**Answer:** "
+                max_answer_length = 2000 - len(question_part)
+                truncated_answer = response[:max_answer_length].rstrip() + "..."
+                final_response = question_part + truncated_answer
+                await interaction.followup.send(content=final_response)
+        else:
+            # All models failed
+            await interaction.followup.send(
+                "🚫 **Retry Failed**\n\n"
+                "The retry attempt also failed. All AI models are currently unavailable.\n\n"
+                "**Question:** " + question,
+                ephemeral=True,
+            )
+
+    except asyncio.TimeoutError:
+        await interaction.followup.send(
+            f"⏰ **Retry Timed Out**\n\n"
+            f"The retry attempt timed out.\n\n"
+            f"**Question:** {question}",
+            ephemeral=True,
+        )
+    except Exception as e:
+        await interaction.followup.send(
+            f"❌ **Retry Error**\n\n"
+            f"An error occurred during the retry attempt.\n\n"
+            f"**Question:** {question}\n"
+            f"**Error:** {str(e)[:200]}...",
+            ephemeral=True,
+        )
 
 
 async def try_gemini_models(question: str, context_string: str) -> Optional[str]:
@@ -257,6 +342,9 @@ async def ask_command(interaction: discord.Interaction, question: str) -> None:
     # Initialize request_start_time for all users
     request_start_time = datetime.datetime.now()
 
+    # Store the question for potential retry
+    store_user_question(user_id, question)
+
     if user_id != owner_id:  # Not the owner, check rate limit
         current_time = request_start_time
 
@@ -282,6 +370,17 @@ async def ask_command(interaction: discord.Interaction, question: str) -> None:
     # Cleanup expired cooldowns occasionally (every 10th request)
     if len(ASK_COMMAND_COOLDOWNS) > 100:  # Only cleanup when we have many entries
         cleanup_expired_cooldowns()
+
+    # Also cleanup recent questions if we have too many stored
+    if (
+        len(RECENT_QUESTIONS) > 200
+    ):  # Cleanup if we have too many users with stored questions
+        # Remove users with no recent questions
+        users_to_remove = [
+            user_id for user_id, questions in RECENT_QUESTIONS.items() if not questions
+        ]
+        for user_id in users_to_remove:
+            del RECENT_QUESTIONS[user_id]
 
     if not GEMINI_CLIENT:
         try:
@@ -670,8 +769,20 @@ async def ask_command(interaction: discord.Interaction, question: str) -> None:
                 "**Status:** Unable to process request\n\n"
                 "Please try again later or contact the bot owner if the problem persists."
             )
+
+            # Create retry button
+            retry_button = discord.ui.Button(
+                style=discord.ButtonStyle.primary,
+                label="🔄 Retry",
+                custom_id=f"retry_{interaction.user.id}_{hash(processed_question) % 1000000}",
+            )
+
+            # Create view with button
+            view = discord.ui.View()
+            view.add_item(retry_button)
+
             try:
-                await interaction.followup.send(content=all_failed_msg)
+                await interaction.followup.send(content=all_failed_msg, view=view)
             except discord.errors.NotFound:
                 print(
                     f"Interaction not found when sending error response for: {processed_question}"
@@ -685,8 +796,20 @@ async def ask_command(interaction: discord.Interaction, question: str) -> None:
             f"**Question:** {processed_question}\n\n"
             "The AI model took too long to respond. Please try again with a simpler question or try again later."
         )
+
+        # Create retry button
+        retry_button = discord.ui.Button(
+            style=discord.ButtonStyle.primary,
+            label="🔄 Retry",
+            custom_id=f"retry_{interaction.user.id}_{hash(processed_question) % 1000000}",
+        )
+
+        # Create view with button
+        view = discord.ui.View()
+        view.add_item(retry_button)
+
         try:
-            await interaction.followup.send(content=timeout_msg)
+            await interaction.followup.send(content=timeout_msg, view=view)
         except discord.errors.NotFound:
             print(
                 f"Interaction not found when sending timeout response for: {processed_question}"
@@ -701,14 +824,94 @@ async def ask_command(interaction: discord.Interaction, question: str) -> None:
             f"**Error:** {str(e)[:200]}...\n\n"
             "Please try again later or contact the bot owner if the problem persists."
         )
+
+        # Create retry button
+        retry_button = discord.ui.Button(
+            style=discord.ButtonStyle.primary,
+            label="🔄 Retry",
+            custom_id=f"retry_{interaction.user.id}_{hash(processed_question) % 1000000}",
+        )
+
+        # Create view with button
+        view = discord.ui.View()
+        view.add_item(retry_button)
+
         try:
-            await interaction.followup.send(content=error_msg)
+            await interaction.followup.send(content=error_msg, view=view)
         except discord.errors.NotFound:
             print(
                 f"Interaction not found when sending error response for: {processed_question}"
             )
             return
         print(f"Error in ask_command: {e}")
+
+
+# Button interaction handler for retry functionality
+@client.event
+async def on_interaction(interaction: discord.Interaction) -> None:
+    """Handle button interactions for retry functionality."""
+    # Only handle button interactions, let the command tree handle slash commands
+    if interaction.type != discord.InteractionType.component:
+        return
+
+    if not interaction.data or "custom_id" not in interaction.data:
+        return
+
+    custom_id = interaction.data["custom_id"]
+
+    # Check if this is a retry button
+    if custom_id.startswith("retry_"):
+        try:
+            # Parse the custom_id to get user_id and question
+            parts = custom_id.split("_", 2)  # Split into max 3 parts
+            if len(parts) >= 3:
+                button_user_id = int(parts[1])
+                question_hash = parts[2]
+
+                # Check if the button was pressed by the original user
+                if interaction.user.id != button_user_id:
+                    await interaction.response.send_message(
+                        "❌ Only the person who asked the original question can use the retry button.",
+                        ephemeral=True,
+                    )
+                    return
+
+                # Find the question by hash
+                if button_user_id in RECENT_QUESTIONS:
+                    for question in RECENT_QUESTIONS[button_user_id]:
+                        if str(hash(question) % 1000000) == question_hash:
+                            # Found the question, retry it directly
+                            await interaction.response.defer(thinking=True)
+
+                            # Call the ask command logic directly
+                            await retry_question(interaction, question)
+                            return
+
+                    # Question not found
+                    await interaction.response.send_message(
+                        "❌ The original question is no longer available for retry.",
+                        ephemeral=True,
+                    )
+                else:
+                    await interaction.response.send_message(
+                        "❌ No recent questions found to retry.",
+                        ephemeral=True,
+                    )
+
+        except (ValueError, IndexError) as e:
+            print(f"Error parsing retry button custom_id: {e}")
+            await interaction.response.send_message(
+                "❌ An error occurred while processing the retry button.",
+                ephemeral=True,
+            )
+        except Exception as e:
+            print(f"Unexpected error in retry button handler: {e}")
+            try:
+                await interaction.response.send_message(
+                    "❌ An unexpected error occurred.", ephemeral=True
+                )
+            except:
+                pass
 
 
 # Development server refresh command (only visible on your dev server)
