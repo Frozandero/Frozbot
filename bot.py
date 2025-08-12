@@ -254,8 +254,11 @@ async def ask_command(interaction: discord.Interaction, question: str) -> None:
     owner_id = int(os.getenv("OWNER_ID", "0"))
     user_id = interaction.user.id
 
+    # Initialize request_start_time for all users
+    request_start_time = datetime.datetime.now()
+
     if user_id != owner_id:  # Not the owner, check rate limit
-        current_time = datetime.datetime.now()
+        current_time = request_start_time
 
         if user_id in ASK_COMMAND_COOLDOWNS:
             last_used = ASK_COMMAND_COOLDOWNS[user_id]
@@ -275,9 +278,6 @@ async def ask_command(interaction: discord.Interaction, question: str) -> None:
                     )
                     return
                 return
-
-        # Store the timestamp but don't apply cooldown yet - only apply if request succeeds
-        request_start_time = current_time
 
     # Cleanup expired cooldowns occasionally (every 10th request)
     if len(ASK_COMMAND_COOLDOWNS) > 100:  # Only cleanup when we have many entries
