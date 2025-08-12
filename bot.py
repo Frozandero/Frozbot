@@ -227,6 +227,33 @@ async def ask_command(interaction: discord.Interaction, question: str) -> None:
     # Create a copy of the question to modify
     processed_question = question
 
+    async def get_user_recent_messages(user_id: int, limit: int = 5) -> list:
+        """Get recent messages from a user in the current channel."""
+        messages = []
+        try:
+            # Get message history from the current channel
+            async for message in interaction.channel.history(limit=100):  # type: ignore
+                if message.author.id == user_id and len(messages) < limit:
+                    # Format message content (truncate if too long)
+                    content = (
+                        message.content[:200] + "..."
+                        if len(message.content) > 200
+                        else message.content
+                    )
+                    messages.append(
+                        {
+                            "content": content,
+                            "timestamp": message.created_at.strftime("%Y-%m-%d %H:%M"),
+                            "attachments": len(message.attachments),
+                            "embeds": len(message.embeds),
+                        }
+                    )
+                if len(messages) >= limit:
+                    break
+        except Exception as e:
+            print(f"Error fetching messages for user {user_id}: {e}")
+        return messages
+
     for user_id_str in matches:
         try:
             user_id = int(user_id_str)
@@ -235,6 +262,9 @@ async def ask_command(interaction: discord.Interaction, question: str) -> None:
             if interaction.guild:
                 member = interaction.guild.get_member(user_id)
                 if member:
+                    # Get recent messages for this user
+                    recent_messages = await get_user_recent_messages(user_id)
+
                     mentioned_users_context.append(
                         {
                             "name": member.display_name,
@@ -253,6 +283,7 @@ async def ask_command(interaction: discord.Interaction, question: str) -> None:
                                 member.top_role.name if member.top_role else "No roles"
                             ),
                             "nickname": member.nick if member.nick else None,
+                            "recent_messages": recent_messages,
                         }
                     )
                     # Replace the mention with the display name in the question
@@ -266,6 +297,9 @@ async def ask_command(interaction: discord.Interaction, question: str) -> None:
                     # User not in server, try to fetch user info
                     try:
                         user = await interaction.client.fetch_user(user_id)
+                        # Get recent messages for this user
+                        recent_messages = await get_user_recent_messages(user_id)
+
                         mentioned_users_context.append(
                             {
                                 "name": user.name,
@@ -277,6 +311,7 @@ async def ask_command(interaction: discord.Interaction, question: str) -> None:
                                 ),
                                 "bot": user.bot,
                                 "note": "User not in this server",
+                                "recent_messages": recent_messages,
                             }
                         )
                         # Replace the mention with the username in the question
@@ -296,6 +331,9 @@ async def ask_command(interaction: discord.Interaction, question: str) -> None:
                 # No guild context, try to fetch user info
                 try:
                     user = await interaction.client.fetch_user(user_id)
+                    # Get recent messages for this user
+                    recent_messages = await get_user_recent_messages(user_id)
+
                     mentioned_users_context.append(
                         {
                             "name": user.name,
@@ -307,6 +345,7 @@ async def ask_command(interaction: discord.Interaction, question: str) -> None:
                             ),
                             "bot": user.bot,
                             "note": "No server context",
+                            "recent_messages": recent_messages,
                         }
                     )
                     # Replace the mention with the username in the question
@@ -373,6 +412,10 @@ async def ask_command(interaction: discord.Interaction, question: str) -> None:
                     ),
                 }
             )
+
+        # Get recent messages for the asking user
+        user_recent_messages = await get_user_recent_messages(interaction.user.id)
+        user_context["recent_messages"] = user_recent_messages
     # Gather channel context
     channel_context = interaction.channel.name if getattr(interaction.channel, "name", None) else None  # type: ignore
 
@@ -408,6 +451,19 @@ async def ask_command(interaction: discord.Interaction, question: str) -> None:
                     if "note" in user_data:
                         user_info_parts.append(f"  Note: {user_data['note']}")
 
+                    # Add recent messages if available
+                    if "recent_messages" in user_data and user_data["recent_messages"]:
+                        user_info_parts.append("  Recent Messages:")
+                        for i, msg in enumerate(user_data["recent_messages"], 1):
+                            msg_info = f"    {i}. [{msg['timestamp']}] {msg['content']}"
+                            if msg["attachments"] > 0:
+                                msg_info += f" (+{msg['attachments']} attachments)"
+                            if msg["embeds"] > 0:
+                                msg_info += f" (+{msg['embeds']} embeds)"
+                            user_info_parts.append(msg_info)
+                    else:
+                        user_info_parts.append("  Recent Messages: None")
+
                     users_info.append("\n".join(user_info_parts))
                 else:
                     users_info.append(str(user_data))
@@ -439,6 +495,19 @@ async def ask_command(interaction: discord.Interaction, question: str) -> None:
                 user_info_parts.append(f"Top Role: {user_context['top_role']}")
             if "nickname" in user_context and user_context["nickname"]:
                 user_info_parts.append(f"Nickname: {user_context['nickname']}")
+
+            # Add recent messages if available
+            if "recent_messages" in user_context and user_context["recent_messages"]:
+                user_info_parts.append("Recent Messages:")
+                for i, msg in enumerate(user_context["recent_messages"], 1):
+                    msg_info = f"  {i}. [{msg['timestamp']}] {msg['content']}"
+                    if msg["attachments"] > 0:
+                        msg_info += f" (+{msg['attachments']} attachments)"
+                    if msg["embeds"] > 0:
+                        msg_info += f" (+{msg['embeds']} embeds)"
+                    user_info_parts.append(msg_info)
+            else:
+                user_info_parts.append("Recent Messages: None")
 
             user_context_str = "\n".join(user_info_parts)
         else:
