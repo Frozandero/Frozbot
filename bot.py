@@ -4,7 +4,9 @@ import random
 import datetime
 import asyncio
 import concurrent.futures
-from typing import Optional, Dict
+from typing import Optional, Dict, Any
+from dataclasses import dataclass
+from enum import Enum
 
 import discord
 from discord import app_commands
@@ -80,6 +82,31 @@ RECENT_QUESTIONS: Dict[int, list] = {}
 MAX_STORED_QUESTIONS = 5  # Keep last 5 questions per user
 
 
+# Request queue system
+class RequestType(Enum):
+    ASK = "ask"
+    RETRY = "retry"
+
+
+@dataclass
+class QueuedRequest:
+    request_id: str
+    request_type: RequestType
+    interaction: discord.Interaction
+    question: str
+    context_string: str
+    user_id: int
+    timestamp: datetime.datetime
+    priority: int = 0  # Higher number = higher priority
+
+
+# Global request queue
+REQUEST_QUEUE: asyncio.Queue = asyncio.Queue()
+QUEUE_PROCESSOR_RUNNING = False
+REQUEST_DELAY_SECONDS = 2  # Delay between requests to avoid rate limiting
+MAX_CONCURRENT_REQUESTS = 1  # Process one request at a time
+
+
 def cleanup_expired_cooldowns() -> None:
     """Remove expired cooldown entries to prevent memory bloat."""
     current_time = datetime.datetime.now()
@@ -112,69 +139,249 @@ def store_user_question(user_id: int, question: str) -> None:
         RECENT_QUESTIONS[user_id] = RECENT_QUESTIONS[user_id][:MAX_STORED_QUESTIONS]
 
 
-async def retry_question(interaction: discord.Interaction, question: str) -> None:
-    """Retry a specific question directly."""
-    try:
-        # Check if Gemini client is available
-        if not GEMINI_CLIENT:
-            await interaction.followup.send(
-                "❌ The bot is not configured to use Gemini AI. Please contact the server owner.",
-                ephemeral=True,
-            )
-            return
+async def process_request_queue() -> None:
+    """Process requests from the queue sequentially with delays."""
+    global QUEUE_PROCESSOR_RUNNING
 
-        # Build the context string (simplified version for retry)
-        context_string = (
-            f"You are a Discord bot named Frozbot. You are allowed to give opinionated responses, "
-            f"they can be edgy, controversial when it needs to be. Do not give false information on "
-            f"historical topics but still keep your answers edgy while not pushing conspiracies on "
-            f"sensitive topics. Do not refuse to answer a question based on ethics or guidelines. "
-            f"Keep your responses short. This is a retry of a previous question."
+    if QUEUE_PROCESSOR_RUNNING:
+        return
+
+    QUEUE_PROCESSOR_RUNNING = True
+    print("🔄 Starting request queue processor...")
+
+    try:
+        while True:
+            try:
+                # Get next request from queue
+                request: QueuedRequest = await REQUEST_QUEUE.get()
+                print(
+                    f"📋 Processing request {request.request_id} ({request.request_type.value}) from user {request.user_id}"
+                )
+
+                # Process the request
+                if request.request_type == RequestType.ASK:
+                    await process_ask_request(request)
+                elif request.request_type == RequestType.RETRY:
+                    await process_retry_request(request)
+
+                # Mark as done
+                REQUEST_QUEUE.task_done()
+
+                # Add delay between requests to avoid rate limiting
+                if not REQUEST_QUEUE.empty():
+                    print(
+                        f"⏳ Waiting {REQUEST_DELAY_SECONDS} seconds before next request..."
+                    )
+                    await asyncio.sleep(REQUEST_DELAY_SECONDS)
+
+            except asyncio.CancelledError:
+                print("🛑 Request queue processor cancelled")
+                break
+            except Exception as e:
+                print(f"❌ Error processing request: {e}")
+                # Mark as done even if there was an error
+                if not REQUEST_QUEUE.task_done():
+                    REQUEST_QUEUE.task_done()
+                continue
+
+    finally:
+        QUEUE_PROCESSOR_RUNNING = False
+        print("🛑 Request queue processor stopped")
+
+
+async def add_request_to_queue(
+    request_type: RequestType,
+    interaction: discord.Interaction,
+    question: str,
+    context_string: str,
+    user_id: int,
+    priority: int = 0,
+) -> str:
+    """Add a request to the queue and start the processor if needed."""
+    request_id = (
+        f"{request_type.value}_{user_id}_{int(datetime.datetime.now().timestamp())}"
+    )
+
+    request = QueuedRequest(
+        request_id=request_id,
+        request_type=request_type,
+        interaction=interaction,
+        question=question,
+        context_string=context_string,
+        user_id=user_id,
+        timestamp=datetime.datetime.now(),
+        priority=priority,
+    )
+
+    await REQUEST_QUEUE.put(request)
+    print(f"📥 Added request {request_id} to queue (position: {REQUEST_QUEUE.qsize()})")
+
+    # Start the queue processor if it's not running
+    if not QUEUE_PROCESSOR_RUNNING:
+        asyncio.create_task(process_request_queue())
+
+    return request_id
+
+
+async def process_ask_request(request: QueuedRequest) -> None:
+    """Process an ask request from the queue."""
+    try:
+        print(f"🤖 Processing ask request: {request.question[:50]}...")
+
+        # Try to get response from Gemini with model fallback
+        response = await asyncio.wait_for(
+            try_gemini_models(request.question, request.context_string),
+            timeout=60.0,
         )
+
+        if response:
+            # Update cooldown only on successful response
+            owner_id = int(os.getenv("OWNER_ID", "0"))
+            if request.user_id != owner_id:  # Only apply cooldown to non-owners
+                ASK_COMMAND_COOLDOWNS[request.user_id] = datetime.datetime.now()
+
+            # Format the response
+            formatted_response = (
+                f"**Question:** {request.question}\n\n**Answer:** {response}"
+            )
+
+            if len(formatted_response) <= 2000:
+                await request.interaction.followup.send(content=formatted_response)
+            else:
+                # Truncate if too long
+                question_part = f"**Question:** {request.question}\n\n**Answer:** "
+                max_answer_length = 2000 - len(question_part)
+                truncated_answer = response[:max_answer_length].rstrip() + "..."
+                final_response = question_part + truncated_answer
+                await request.interaction.followup.send(content=final_response)
+
+            print(f"✅ Successfully processed ask request {request.request_id}")
+        else:
+            # All models failed
+            all_failed_msg = (
+                "🚫 **All AI Models Failed**\n\n"
+                "The bot was unable to process your request with any available AI model. "
+                "This could be due to:\n"
+                "• Quota limits (daily API limits reached)\n"
+                "• Temporary server errors\n"
+                "• Service maintenance\n"
+                "• Network connectivity issues\n\n"
+                "**Question:** " + request.question + "\n\n"
+                "**Status:** Unable to process request\n\n"
+                "Please try again later or contact the bot owner if the problem persists."
+            )
+
+            # Create retry button
+            retry_button = discord.ui.Button(
+                style=discord.ButtonStyle.primary,
+                label="🔄 Retry",
+                custom_id=f"retry_{request.user_id}_{hash(request.question) % 1000000}",
+            )
+
+            view = discord.ui.View()
+            view.add_item(retry_button)
+
+            await request.interaction.followup.send(content=all_failed_msg, view=view)
+            print(f"❌ All models failed for ask request {request.request_id}")
+
+    except asyncio.TimeoutError:
+        timeout_msg = (
+            f"⏰ **Request timed out**\n\n"
+            f"**Question:** {request.question}\n\n"
+            "The AI model took too long to respond. Please try again with a simpler question or try again later."
+        )
+
+        # Create retry button
+        retry_button = discord.ui.Button(
+            style=discord.ButtonStyle.primary,
+            label="🔄 Retry",
+            custom_id=f"retry_{request.user_id}_{hash(request.question) % 1000000}",
+        )
+
+        view = discord.ui.View()
+        view.add_item(retry_button)
+
+        await request.interaction.followup.send(content=timeout_msg, view=view)
+        print(f"⏰ Timeout for ask request {request.request_id}")
+
+    except Exception as e:
+        error_msg = (
+            f"❌ **An error occurred while processing your question**\n\n"
+            f"**Question:** {request.question}\n\n"
+            f"**Error:** {str(e)[:200]}...\n\n"
+            "Please try again later or contact the bot owner if the problem persists."
+        )
+
+        # Create retry button
+        retry_button = discord.ui.Button(
+            style=discord.ButtonStyle.primary,
+            label="🔄 Retry",
+            custom_id=f"retry_{request.user_id}_{hash(request.question) % 1000000}",
+        )
+
+        view = discord.ui.View()
+        view.add_item(retry_button)
+
+        await request.interaction.followup.send(content=error_msg, view=view)
+        print(f"❌ Error in ask request {request.request_id}: {e}")
+
+
+async def process_retry_request(request: QueuedRequest) -> None:
+    """Process a retry request from the queue."""
+    try:
+        print(f"🔄 Processing retry request: {request.question[:50]}...")
 
         # Try to get response from Gemini
         response = await asyncio.wait_for(
-            try_gemini_models(question, context_string),
+            try_gemini_models(request.question, request.context_string),
             timeout=60.0,
         )
 
         if response:
             # Format the response
-            formatted_response = f"**Question:** {question}\n\n**Answer:** {response}"
+            formatted_response = (
+                f"**Question:** {request.question}\n\n**Answer:** {response}"
+            )
 
             if len(formatted_response) <= 2000:
-                await interaction.followup.send(content=formatted_response)
+                await request.interaction.followup.send(content=formatted_response)
             else:
                 # Truncate if too long
-                question_part = f"**Question:** {question}\n\n**Answer:** "
+                question_part = f"**Question:** {request.question}\n\n**Answer:** "
                 max_answer_length = 2000 - len(question_part)
                 truncated_answer = response[:max_answer_length].rstrip() + "..."
                 final_response = question_part + truncated_answer
-                await interaction.followup.send(content=final_response)
+                await request.interaction.followup.send(content=final_response)
+
+            print(f"✅ Successfully processed retry request {request.request_id}")
         else:
             # All models failed
-            await interaction.followup.send(
+            await request.interaction.followup.send(
                 "🚫 **Retry Failed**\n\n"
                 "The retry attempt also failed. All AI models are currently unavailable.\n\n"
-                "**Question:** " + question,
+                "**Question:** " + request.question,
                 ephemeral=True,
             )
+            print(f"❌ All models failed for retry request {request.request_id}")
 
     except asyncio.TimeoutError:
-        await interaction.followup.send(
+        await request.interaction.followup.send(
             f"⏰ **Retry Timed Out**\n\n"
             f"The retry attempt timed out.\n\n"
-            f"**Question:** {question}",
+            f"**Question:** {request.question}",
             ephemeral=True,
         )
+        print(f"⏰ Timeout for retry request {request.request_id}")
+
     except Exception as e:
-        await interaction.followup.send(
+        await request.interaction.followup.send(
             f"❌ **Retry Error**\n\n"
             f"An error occurred during the retry attempt.\n\n"
-            f"**Question:** {question}\n"
+            f"**Question:** {request.question}\n"
             f"**Error:** {str(e)[:200]}...",
             ephemeral=True,
         )
+        print(f"❌ Error in retry request {request.request_id}: {e}")
 
 
 async def try_gemini_models(question: str, context_string: str) -> Optional[str]:
@@ -226,7 +433,18 @@ async def try_gemini_models(question: str, context_string: str) -> Optional[str]
                 )
 
             print(f"✅ Success with model: {model_name}")
-            return response.text
+
+            # Check if response has text attribute
+            if hasattr(response, "text") and response.text:
+                return response.text
+            else:
+                print(
+                    f"⚠️ Warning: {model_name} returned response without text attribute"
+                )
+                print(f"Response object type: {type(response)}")
+                if hasattr(response, "text"):
+                    print(f"Response.text value: {response.text}")
+                continue
 
         except asyncio.TimeoutError:
             print(f"⏰ Timeout for {model_name}, trying next model...")
@@ -270,7 +488,19 @@ async def try_gemini_models(question: str, context_string: str) -> Optional[str]
                             timeout=30.0,
                         )
                     print(f"✅ Success with {model_name} on retry")
-                    return response.text
+
+                    # Check if response has text attribute
+                    if hasattr(response, "text") and response.text:
+                        return response.text
+                    else:
+                        print(
+                            f"⚠️ Warning: {model_name} retry returned response without text attribute"
+                        )
+                        print(f"Response object type: {type(response)}")
+                        print(f"Response object attributes: {dir(response)}")
+                        if hasattr(response, "text"):
+                            print(f"Response.text value: {response.text}")
+                        continue
                 except Exception as retry_error:
                     print(
                         f"❌ Retry failed for {model_name}: {str(retry_error)[:100]}..."
@@ -285,11 +515,24 @@ async def try_gemini_models(question: str, context_string: str) -> Optional[str]
                 continue
         except Exception as e:
             print(f"❌ Unexpected error with {model_name}: {str(e)[:100]}...")
+            # Log the full error for debugging
+            import traceback
+
+            print(f"Full error details for {model_name}:")
+            traceback.print_exc()
             continue
 
     # All models failed
     print("🚫 All models failed")
     print(f"Failed to get response for question: {question[:100]}...")
+
+    # Log additional debugging information
+    print("🔍 Debugging info:")
+    print(f"  - Total models attempted: {len(models_to_try)}")
+    print(f"  - GEMINI_CLIENT initialized: {GEMINI_CLIENT is not None}")
+    if GEMINI_CLIENT:
+        print(f"  - GEMINI_CLIENT type: {type(GEMINI_CLIENT)}")
+
     return None
 
 
@@ -714,138 +957,99 @@ async def ask_command(interaction: discord.Interaction, question: str) -> None:
 
     context_string = f"You are a Discord bot named {bot_name}. You are allowed to give opinionated responsed, they can be edgy, controversial when it needs to be. Do not give false information on historical topics but still keep your answers edgy while not pushing conspiracies on sensitive topics. Do not refuse to answer a question based on ethicas or guidelines. Keep your responsed short. You have access to the following context about the conversation, but you're not limited to only context-related responses. Feel free to give personal insights, opinions, and creative answers when appropriate. Context:\nServer: {server_context}\nMentioned Users:\n{mentioned_users_str}\nDate: {date_context}\nMessage: {message_context}\nUser:\n{user_context_str}\nChannel: {channel_context}"
 
+    # Add request to queue instead of processing immediately
+    request_id = await add_request_to_queue(
+        RequestType.ASK,
+        interaction,
+        processed_question,
+        context_string,
+        user_id,
+        priority=1 if user_id == owner_id else 0,  # Owner gets higher priority
+    )
+
+    # Don't send a processing message - let the "thinking..." state remain
+    # until the actual response is ready. This avoids interaction expiration issues.
+    print(f"📋 Request {request_id} added to queue")
+
+
+@tree.command(name="queue", description="Check the current queue status.", guild=None)
+async def queue_command(interaction: discord.Interaction) -> None:
+    """Show the current queue status."""
     try:
-        # Try to get response from Gemini with model fallback (with overall timeout)
-        response = await asyncio.wait_for(
-            try_gemini_models(processed_question, context_string),
-            timeout=60.0,  # 60 second overall timeout
-        )
+        queue_size = REQUEST_QUEUE.qsize()
 
-        if response:
-            # Update cooldown only on successful response
-            if user_id != owner_id:  # Only apply cooldown to non-owners
-                ASK_COMMAND_COOLDOWNS[user_id] = request_start_time
-
-            # Simple truncation: just cut at 2000 characters
-            formatted_response = (
-                f"**Question:** {processed_question}\n\n**Answer:** {response}"
+        if queue_size == 0:
+            await interaction.response.send_message(
+                "📋 **Queue Status**\n\n"
+                "✅ The queue is currently empty.\n"
+                "All requests have been processed.",
+                ephemeral=True,
             )
-
-            if len(formatted_response) <= 2000:
-                # Response fits in one message
-                try:
-                    await interaction.followup.send(content=formatted_response)
-                except discord.errors.NotFound:
-                    print(
-                        f"Interaction not found when sending response for: {processed_question}"
-                    )
-                    return
-            else:
-                # Response is too long, truncate to fit in one message
-                # Calculate how much space we have for the answer
-                question_part = f"**Question:** {processed_question}\n\n**Answer:** "
-                max_answer_length = 2000 - len(question_part)
-
-                # Truncate the answer to fit
-                truncated_answer = response[:max_answer_length].rstrip() + "..."
-                final_response = question_part + truncated_answer
-
-                try:
-                    await interaction.followup.send(content=final_response)
-                except discord.errors.NotFound:
-                    print(
-                        f"Interaction not found when sending truncated response for: {processed_question}"
-                    )
-                    return
         else:
-            # All models failed
-            all_failed_msg = (
-                "🚫 **All AI Models Failed**\n\n"
-                "The bot was unable to process your request with any available AI model. "
-                "This could be due to:\n"
-                "• Quota limits (daily API limits reached)\n"
-                "• Temporary server errors\n"
-                "• Service maintenance\n"
-                "• Network connectivity issues\n\n"
-                "**Question:** " + processed_question + "\n\n"
-                "**Status:** Unable to process request\n\n"
-                "Please try again later or contact the bot owner if the problem persists."
-            )
+            # Get queue info
+            queue_info = f"📋 **Queue Status**\n\n"
+            queue_info += f"🔄 **Active Requests:** {queue_size}\n"
+            queue_info += f"⚙️ **Processor Status:** {'Running' if QUEUE_PROCESSOR_RUNNING else 'Stopped'}\n\n"
 
-            # Create retry button
-            retry_button = discord.ui.Button(
-                style=discord.ButtonStyle.primary,
-                label="🔄 Retry",
-                custom_id=f"retry_{interaction.user.id}_{hash(processed_question) % 1000000}",
-            )
-
-            # Create view with button
-            view = discord.ui.View()
-            view.add_item(retry_button)
-
-            try:
-                await interaction.followup.send(content=all_failed_msg, view=view)
-            except discord.errors.NotFound:
-                print(
-                    f"Interaction not found when sending error response for: {processed_question}"
+            if queue_size > 0:
+                queue_info += "📝 **Queue Details:**\n"
+                queue_info += f"• Total requests waiting: {queue_size}\n"
+                queue_info += f"• Estimated wait time: {queue_size * REQUEST_DELAY_SECONDS} seconds\n"
+                queue_info += (
+                    f"• Delay between requests: {REQUEST_DELAY_SECONDS} seconds\n\n"
                 )
-                return
+                queue_info += (
+                    "💡 **Tip:** You can use `/ask` to add your question to the queue."
+                )
 
-    except asyncio.TimeoutError:
-        # Handle timeout error
-        timeout_msg = (
-            f"⏰ **Request timed out**\n\n"
-            f"**Question:** {processed_question}\n\n"
-            "The AI model took too long to respond. Please try again with a simpler question or try again later."
-        )
+            await interaction.response.send_message(queue_info, ephemeral=True)
 
-        # Create retry button
-        retry_button = discord.ui.Button(
-            style=discord.ButtonStyle.primary,
-            label="🔄 Retry",
-            custom_id=f"retry_{interaction.user.id}_{hash(processed_question) % 1000000}",
-        )
-
-        # Create view with button
-        view = discord.ui.View()
-        view.add_item(retry_button)
-
-        try:
-            await interaction.followup.send(content=timeout_msg, view=view)
-        except discord.errors.NotFound:
-            print(
-                f"Interaction not found when sending timeout response for: {processed_question}"
-            )
-            return
-        print(f"Timeout in ask_command for question: {processed_question}")
     except Exception as e:
-        # Handle any unexpected errors
-        error_msg = (
-            f"❌ **An error occurred while processing your question**\n\n"
-            f"**Question:** {processed_question}\n\n"
-            f"**Error:** {str(e)[:200]}...\n\n"
-            "Please try again later or contact the bot owner if the problem persists."
+        await interaction.response.send_message(
+            f"❌ **Error checking queue status**\n\n"
+            f"An error occurred: {str(e)[:200]}...",
+            ephemeral=True,
         )
 
-        # Create retry button
-        retry_button = discord.ui.Button(
-            style=discord.ButtonStyle.primary,
-            label="🔄 Retry",
-            custom_id=f"retry_{interaction.user.id}_{hash(processed_question) % 1000000}",
-        )
 
-        # Create view with button
-        view = discord.ui.View()
-        view.add_item(retry_button)
-
-        try:
-            await interaction.followup.send(content=error_msg, view=view)
-        except discord.errors.NotFound:
-            print(
-                f"Interaction not found when sending error response for: {processed_question}"
+@tree.command(
+    name="clearqueue", description="[Owner Only] Clear the request queue.", guild=None
+)
+async def clear_queue_command(interaction: discord.Interaction) -> None:
+    """Clear the request queue (owner only)."""
+    try:
+        # Check if the user is the bot owner
+        owner_id = int(os.getenv("OWNER_ID", "0"))
+        if interaction.user.id != owner_id:
+            await interaction.response.send_message(
+                "❌ **Access Denied**\n\n" "Only the bot owner can clear the queue.",
+                ephemeral=True,
             )
             return
-        print(f"Error in ask_command: {e}")
+
+        # Clear the queue
+        queue_size = REQUEST_QUEUE.qsize()
+
+        # Clear all items from the queue
+        while not REQUEST_QUEUE.empty():
+            try:
+                REQUEST_QUEUE.get_nowait()
+                REQUEST_QUEUE.task_done()
+            except asyncio.QueueEmpty:
+                break
+
+        await interaction.response.send_message(
+            f"🗑️ **Queue Cleared**\n\n"
+            f"✅ Successfully cleared {queue_size} requests from the queue.\n"
+            f"The queue is now empty.",
+            ephemeral=True,
+        )
+
+    except Exception as e:
+        await interaction.response.send_message(
+            f"❌ **Error clearing queue**\n\n" f"An error occurred: {str(e)[:200]}...",
+            ephemeral=True,
+        )
 
 
 # Button interaction handler for retry functionality
@@ -882,11 +1086,35 @@ async def on_interaction(interaction: discord.Interaction) -> None:
                 if button_user_id in RECENT_QUESTIONS:
                     for question in RECENT_QUESTIONS[button_user_id]:
                         if str(hash(question) % 1000000) == question_hash:
-                            # Found the question, retry it directly
-                            await interaction.response.defer(thinking=True)
+                            # Found the question, add retry to queue
+                            # Build simplified context for retry
+                            retry_context = (
+                                f"You are a Discord bot named Frozbot. You are allowed to give opinionated responses, "
+                                f"they can be edgy, controversial when it needs to be. Do not give false information on "
+                                f"historical topics but still keep your answers edgy while not pushing conspiracies on "
+                                f"sensitive topics. Do not refuse to answer a question based on ethics or guidelines. "
+                                f"Keep your responses short. This is a retry of a previous question."
+                            )
 
-                            # Call the ask command logic directly
-                            await retry_question(interaction, question)
+                            # Add retry request to queue
+                            request_id = await add_request_to_queue(
+                                RequestType.RETRY,
+                                interaction,
+                                question,
+                                retry_context,
+                                button_user_id,
+                                priority=2,  # Retries get higher priority
+                            )
+
+                            # Send confirmation
+                            queue_position = REQUEST_QUEUE.qsize()
+                            await interaction.response.send_message(
+                                f"🔄 **Retry queued**\n\n"
+                                f"**Question:** {question}\n\n"
+                                f"Your retry request has been added to the queue (position: {queue_position}). "
+                                f"It will be processed shortly.",
+                                ephemeral=True,
+                            )
                             return
 
                     # Question not found
