@@ -148,16 +148,61 @@ async def try_gemini_models(question: str, context_string: str) -> Optional[str]
             if e.code == 429:
                 print(f"⏰ Quota exceeded for {model_name}, trying next model...")
                 continue
+            elif e.code in [
+                500,
+                502,
+                503,
+                504,
+            ]:  # Server errors that might be temporary
+                print(f"🔄 Server error ({e.code}) for {model_name}, retrying...")
+                # For server errors, try the same model again once
+                try:
+                    print(f"🔄 Retrying {model_name} after server error...")
+                    # Add a small delay before retry to avoid overwhelming the service
+                    await asyncio.sleep(1)
+
+                    # Define the retry function inline to avoid scope issues
+                    def retry_gemini_api():
+                        if not GEMINI_CLIENT:
+                            raise RuntimeError("Gemini client not initialized")
+                        return GEMINI_CLIENT.models.generate_content(
+                            model=model_name,
+                            config=types.GenerateContentConfig(
+                                system_instruction=context_string,  # type: ignore
+                                thinking_config=types.ThinkingConfig(
+                                    thinking_budget=thinking_budget
+                                ),
+                            ),
+                            contents=question,
+                        )
+
+                    loop = asyncio.get_event_loop()
+                    with concurrent.futures.ThreadPoolExecutor() as executor:
+                        response = await asyncio.wait_for(
+                            loop.run_in_executor(executor, retry_gemini_api),
+                            timeout=30.0,
+                        )
+                    print(f"✅ Success with {model_name} on retry")
+                    return response.text
+                except Exception as retry_error:
+                    print(
+                        f"❌ Retry failed for {model_name}: {str(retry_error)[:100]}..."
+                    )
+                    continue
             else:
-                # Non-quota error, log and return None
-                print(f"❌ Non-quota error with {model_name}: {e.message[:100]}...")  # type: ignore
-                return None
+                # Non-quota, non-server error, log and try next model
+                error_msg = e.message if e.message else str(e)
+                print(
+                    f"❌ Non-quota error with {model_name}: {error_msg[:100]}... (code: {e.code})"
+                )
+                continue
         except Exception as e:
             print(f"❌ Unexpected error with {model_name}: {str(e)[:100]}...")
             continue
 
-    # All models failed with quota errors
-    print("🚫 All models failed with quota errors")
+    # All models failed
+    print("🚫 All models failed")
+    print(f"Failed to get response for question: {question[:100]}...")
     return None
 
 
@@ -183,14 +228,24 @@ async def iq_command(
 
     if user:
         # Someone else's IQ
-        await interaction.response.send_message(
-            f"{user.display_name}'s IQ is {iq_value}."
-        )
+        try:
+            await interaction.response.send_message(
+                f"{user.display_name}'s IQ is {iq_value}."
+            )
+        except discord.errors.NotFound:
+            print(f"Interaction not found when sending IQ response for user {user.id}")
+            return
     else:
         # Own IQ
-        await interaction.response.send_message(
-            f"{interaction.user.display_name}, your IQ is {iq_value}."
-        )
+        try:
+            await interaction.response.send_message(
+                f"{interaction.user.display_name}, your IQ is {iq_value}."
+            )
+        except discord.errors.NotFound:
+            print(
+                f"Interaction not found when sending IQ response for user {interaction.user.id}"
+            )
+            return
 
 
 @tree.command(name="ask", description="Ask the bot a question.", guild=None)
@@ -209,10 +264,16 @@ async def ask_command(interaction: discord.Interaction, question: str) -> None:
 
             if minutes_passed < ASK_COMMAND_COOLDOWN_MINUTES:
                 remaining_minutes = int(ASK_COMMAND_COOLDOWN_MINUTES - minutes_passed)
-                await interaction.response.send_message(
-                    f"⏰ Rate limit: You can only ask questions once every {ASK_COMMAND_COOLDOWN_MINUTES} minutes. Please wait {remaining_minutes} more minutes.",
-                    ephemeral=True,
-                )
+                try:
+                    await interaction.response.send_message(
+                        f"⏰ Rate limit: You can only ask questions once every {ASK_COMMAND_COOLDOWN_MINUTES} minutes. Please wait {remaining_minutes} more minutes.",
+                        ephemeral=True,
+                    )
+                except discord.errors.NotFound:
+                    print(
+                        f"Interaction not found when sending rate limit message for user {user_id}"
+                    )
+                    return
                 return
 
         # Store the timestamp but don't apply cooldown yet - only apply if request succeeds
@@ -223,14 +284,25 @@ async def ask_command(interaction: discord.Interaction, question: str) -> None:
         cleanup_expired_cooldowns()
 
     if not GEMINI_CLIENT:
-        await interaction.response.send_message(
-            "The bot is not configured to use Gemini AI. Please contact the server owner.",
-            ephemeral=True,
-        )
+        try:
+            await interaction.response.send_message(
+                "The bot is not configured to use Gemini AI. Please contact the server owner.",
+                ephemeral=True,
+            )
+        except discord.errors.NotFound:
+            print(
+                f"Interaction not found when sending Gemini config error for: {question}"
+            )
+            return
         return
 
     # Defer the response to give us more time (up to 15 minutes)
-    await interaction.response.defer(thinking=True)
+    try:
+        await interaction.response.defer(thinking=True)
+    except discord.errors.NotFound:
+        # Interaction has already timed out
+        print(f"Interaction already timed out for question: {question}")
+        return
 
     # Gathering context
     # Gather server context
@@ -560,7 +632,13 @@ async def ask_command(interaction: discord.Interaction, question: str) -> None:
 
             if len(formatted_response) <= 2000:
                 # Response fits in one message
-                await interaction.followup.send(content=formatted_response)
+                try:
+                    await interaction.followup.send(content=formatted_response)
+                except discord.errors.NotFound:
+                    print(
+                        f"Interaction not found when sending response for: {processed_question}"
+                    )
+                    return
             else:
                 # Response is too long, truncate to fit in one message
                 # Calculate how much space we have for the answer
@@ -571,17 +649,35 @@ async def ask_command(interaction: discord.Interaction, question: str) -> None:
                 truncated_answer = response[:max_answer_length].rstrip() + "..."
                 final_response = question_part + truncated_answer
 
-                await interaction.followup.send(content=final_response)
+                try:
+                    await interaction.followup.send(content=final_response)
+                except discord.errors.NotFound:
+                    print(
+                        f"Interaction not found when sending truncated response for: {processed_question}"
+                    )
+                    return
         else:
-            # All models failed with quota errors
-            quota_error_msg = (
-                "🚫 **All AI Models Quota Exceeded**\n\n"
-                "The bot has reached its daily limit for all AI models. "
-                "This resets daily at midnight UTC.\n\n"
+            # All models failed
+            all_failed_msg = (
+                "🚫 **All AI Models Failed**\n\n"
+                "The bot was unable to process your request with any available AI model. "
+                "This could be due to:\n"
+                "• Quota limits (daily API limits reached)\n"
+                "• Temporary server errors\n"
+                "• Service maintenance\n"
+                "• Network connectivity issues\n\n"
                 "**Question:** " + processed_question + "\n\n"
-                "**Status:** Unable to process due to quota limits"
+                "**Status:** Unable to process request\n\n"
+                "Please try again later or contact the bot owner if the problem persists."
             )
-            await interaction.followup.send(content=quota_error_msg)
+            try:
+                await interaction.followup.send(content=all_failed_msg)
+            except discord.errors.NotFound:
+                print(
+                    f"Interaction not found when sending error response for: {processed_question}"
+                )
+                return
+
     except asyncio.TimeoutError:
         # Handle timeout error
         timeout_msg = (
@@ -589,7 +685,13 @@ async def ask_command(interaction: discord.Interaction, question: str) -> None:
             f"**Question:** {processed_question}\n\n"
             "The AI model took too long to respond. Please try again with a simpler question or try again later."
         )
-        await interaction.followup.send(content=timeout_msg)
+        try:
+            await interaction.followup.send(content=timeout_msg)
+        except discord.errors.NotFound:
+            print(
+                f"Interaction not found when sending timeout response for: {processed_question}"
+            )
+            return
         print(f"Timeout in ask_command for question: {processed_question}")
     except Exception as e:
         # Handle any unexpected errors
@@ -599,7 +701,13 @@ async def ask_command(interaction: discord.Interaction, question: str) -> None:
             f"**Error:** {str(e)[:200]}...\n\n"
             "Please try again later or contact the bot owner if the problem persists."
         )
-        await interaction.followup.send(content=error_msg)
+        try:
+            await interaction.followup.send(content=error_msg)
+        except discord.errors.NotFound:
+            print(
+                f"Interaction not found when sending error response for: {processed_question}"
+            )
+            return
         print(f"Error in ask_command: {e}")
 
 
@@ -612,36 +720,61 @@ async def ask_command(interaction: discord.Interaction, question: str) -> None:
 async def refresh_commands(interaction: discord.Interaction) -> None:
     # Check if the user is the bot owner (you)
     if interaction.user.id != int(os.getenv("OWNER_ID", "0")):
-        await interaction.response.send_message(
-            "You don't have permission to use this command.", ephemeral=True
-        )
+        try:
+            await interaction.response.send_message(
+                "You don't have permission to use this command.", ephemeral=True
+            )
+        except discord.errors.NotFound:
+            print(
+                f"Interaction not found when sending permission error for refresh command"
+            )
+            return
         return
 
     try:
         await interaction.response.defer(ephemeral=True)
+    except discord.errors.NotFound:
+        print("Interaction not found when deferring refresh command")
+        return
 
         # Clear commands from the specific guild first
         if GUILD_ID_ENV:
             test_guild = discord.Object(id=int(GUILD_ID_ENV))
             tree.clear_commands(guild=test_guild)
             await tree.sync(guild=test_guild)
-            await interaction.followup.send(
-                f"Commands cleared and refreshed on guild {GUILD_ID_ENV}!",
-                ephemeral=True,
-            )
+            try:
+                await interaction.followup.send(
+                    f"Commands cleared and refreshed on guild {GUILD_ID_ENV}!",
+                    ephemeral=True,
+                )
+            except discord.errors.NotFound:
+                print(
+                    "Interaction not found when sending guild refresh success message"
+                )
+                return
         else:
             # Clear global commands
             tree.clear_commands(guild=None)
             await tree.sync()
-            await interaction.followup.send(
-                "Commands cleared and refreshed globally! (May take up to 1 hour)",
-                ephemeral=True,
-            )
+            try:
+                await interaction.followup.send(
+                    "Commands cleared and refreshed globally! (May take up to 1 hour)",
+                    ephemeral=True,
+                )
+            except discord.errors.NotFound:
+                print(
+                    "Interaction not found when sending global refresh success message"
+                )
+                return
 
     except Exception as e:
-        await interaction.followup.send(
-            f"Failed to refresh commands: {e}", ephemeral=True
-        )
+        try:
+            await interaction.followup.send(
+                f"Failed to refresh commands: {e}", ephemeral=True
+            )
+        except discord.errors.NotFound:
+            print("Interaction not found when sending refresh error message")
+            return
 
 
 @client.event
