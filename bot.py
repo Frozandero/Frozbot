@@ -75,7 +75,9 @@ GEMINI_CLIENT = genai.Client() if os.getenv("GEMINI_API_KEY") else None
 
 # Rate limiting for ask command: user_id -> last_used_timestamp
 ASK_COMMAND_COOLDOWNS: Dict[int, datetime.datetime] = {}
-ASK_COMMAND_COOLDOWN_MINUTES = 30  # 30 minutes cooldown
+ASK_COMMAND_COOLDOWN_MINUTES = int(
+    os.getenv("ASK_COMMAND_COOLDOWN_MINUTES", "30")
+)  # 30 minutes cooldown
 
 # Store recent questions for retry functionality: user_id -> list of recent questions
 RECENT_QUESTIONS: Dict[int, list] = {}
