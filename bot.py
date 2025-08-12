@@ -233,7 +233,7 @@ async def ask_command(interaction: discord.Interaction, question: str) -> None:
         messages = []
         try:
             # Get message history from the current channel
-            async for message in interaction.channel.history(limit=100):  # type: ignore
+            async for message in interaction.channel.history(limit=1000):  # type: ignore
                 if message.author.id == user_id and len(messages) < limit:
                     # Format message content (truncate if too long)
                     content = (
