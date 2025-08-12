@@ -83,6 +83,14 @@ ASK_COMMAND_COOLDOWN_MINUTES = int(
 RECENT_QUESTIONS: Dict[int, list] = {}
 MAX_STORED_QUESTIONS = 5  # Keep last 5 questions per user
 
+# Configurable message history settings
+MESSAGE_HISTORY_LIMIT = int(
+    os.getenv("MESSAGE_HISTORY_LIMIT", "5")
+)  # Number of recent messages to fetch per user
+MESSAGE_HISTORY_SEARCH_DEPTH = int(
+    os.getenv("MESSAGE_HISTORY_SEARCH_DEPTH", "1000")
+)  # How far back to search in channel history
+
 
 # Request queue system
 class RequestType(Enum):
@@ -664,12 +672,17 @@ async def ask_command(interaction: discord.Interaction, question: str) -> None:
     # Create a copy of the question to modify
     processed_question = question
 
-    async def get_user_recent_messages(user_id: int, limit: int = 5) -> list:
+    async def get_user_recent_messages(
+        user_id: int, limit: Optional[int] = None
+    ) -> list:
         """Get recent messages from a user in the current channel."""
+        if limit is None:
+            limit = MESSAGE_HISTORY_LIMIT
+
         messages = []
         try:
             # Get message history from the current channel
-            async for message in interaction.channel.history(limit=1000):  # type: ignore
+            async for message in interaction.channel.history(limit=MESSAGE_HISTORY_SEARCH_DEPTH):  # type: ignore
                 if message.author.id == user_id and len(messages) < limit:
                     # Format message content (truncate if too long)
                     content = (
@@ -1050,6 +1063,168 @@ async def clear_queue_command(interaction: discord.Interaction) -> None:
     except Exception as e:
         await interaction.response.send_message(
             f"❌ **Error clearing queue**\n\n" f"An error occurred: {str(e)[:200]}...",
+            ephemeral=True,
+        )
+
+
+@tree.command(
+    name="sethistorylimit",
+    description="[Owner Only] Set the number of recent messages to fetch per user.",
+    guild=discord.Object(id=int(os.getenv("DEV_SERVER_ID", "0"))),
+)
+async def set_history_limit_command(
+    interaction: discord.Interaction, limit: Optional[int] = None
+) -> None:
+    """Set the message history limit (owner only)."""
+    try:
+        # Check if the user is the bot owner
+        owner_id = int(os.getenv("OWNER_ID", "0"))
+        if interaction.user.id != owner_id:
+            await interaction.response.send_message(
+                "❌ **Access Denied**\n\n"
+                "Only the bot owner can set the history limit.",
+                ephemeral=True,
+            )
+            return
+
+        global MESSAGE_HISTORY_LIMIT
+
+        if limit is None:
+            # Return current value
+            await interaction.response.send_message(
+                f"📊 **Current Message History Limit**\n\n"
+                f"**Value:** {MESSAGE_HISTORY_LIMIT} messages\n\n"
+                f"Use `/sethistorylimit <number>` to change this value.",
+                ephemeral=True,
+            )
+        else:
+            # Set new value
+            if limit < 1 or limit > 50:
+                await interaction.response.send_message(
+                    "❌ **Invalid Value**\n\n"
+                    f"Please provide a value between 1 and 50.\n"
+                    f"Current value: {MESSAGE_HISTORY_LIMIT}",
+                    ephemeral=True,
+                )
+                return
+
+            old_limit = MESSAGE_HISTORY_LIMIT
+            MESSAGE_HISTORY_LIMIT = limit
+
+            await interaction.response.send_message(
+                f"✅ **Message History Limit Updated**\n\n"
+                f"**Old Value:** {old_limit} messages\n"
+                f"**New Value:** {MESSAGE_HISTORY_LIMIT} messages\n\n"
+                f"This change will take effect immediately for new requests.",
+                ephemeral=True,
+            )
+
+    except Exception as e:
+        await interaction.response.send_message(
+            f"❌ **Error setting history limit**\n\n"
+            f"An error occurred: {str(e)[:200]}...",
+            ephemeral=True,
+        )
+
+
+@tree.command(
+    name="setsearchdepth",
+    description="[Owner Only] Set how far back to search in channel history.",
+    guild=discord.Object(id=int(os.getenv("DEV_SERVER_ID", "0"))),
+)
+async def set_search_depth_command(
+    interaction: discord.Interaction, depth: Optional[int] = None
+) -> None:
+    """Set the message history search depth (owner only)."""
+    try:
+        # Check if the user is the bot owner
+        owner_id = int(os.getenv("OWNER_ID", "0"))
+        if interaction.user.id != owner_id:
+            await interaction.response.send_message(
+                "❌ **Access Denied**\n\n"
+                "Only the bot owner can set the search depth.",
+                ephemeral=True,
+            )
+            return
+
+        global MESSAGE_HISTORY_SEARCH_DEPTH
+
+        if depth is None:
+            # Return current value
+            await interaction.response.send_message(
+                f"🔍 **Current Message History Search Depth**\n\n"
+                f"**Value:** {MESSAGE_HISTORY_SEARCH_DEPTH} messages\n\n"
+                f"Use `/setsearchdepth <number>` to change this value.",
+                ephemeral=True,
+            )
+        else:
+            # Set new value
+            if depth < 100 or depth > 10000:
+                await interaction.response.send_message(
+                    "❌ **Invalid Value**\n\n"
+                    f"Please provide a value between 100 and 10,000.\n"
+                    f"Current value: {MESSAGE_HISTORY_SEARCH_DEPTH}",
+                    ephemeral=True,
+                )
+                return
+
+            old_depth = MESSAGE_HISTORY_SEARCH_DEPTH
+            MESSAGE_HISTORY_SEARCH_DEPTH = depth
+
+            await interaction.response.send_message(
+                f"✅ **Message History Search Depth Updated**\n\n"
+                f"**Old Value:** {old_depth} messages\n"
+                f"**New Value:** {MESSAGE_HISTORY_SEARCH_DEPTH} messages\n\n"
+                f"This change will take effect immediately for new requests.",
+                ephemeral=True,
+            )
+
+    except Exception as e:
+        await interaction.response.send_message(
+            f"❌ **Error setting search depth**\n\n"
+            f"An error occurred: {str(e)[:200]}...",
+            ephemeral=True,
+        )
+
+
+@tree.command(
+    name="config",
+    description="[Owner Only] View current bot configuration.",
+    guild=discord.Object(id=int(os.getenv("DEV_SERVER_ID", "0"))),
+)
+async def config_command(interaction: discord.Interaction) -> None:
+    """View current bot configuration (owner only)."""
+    try:
+        # Check if the user is the bot owner
+        owner_id = int(os.getenv("OWNER_ID", "0"))
+        if interaction.user.id != owner_id:
+            await interaction.response.send_message(
+                "❌ **Access Denied**\n\n"
+                "Only the bot owner can view the configuration.",
+                ephemeral=True,
+            )
+            return
+
+        config_info = f"⚙️ **Bot Configuration**\n\n"
+        config_info += f"**Message History Limit:** {MESSAGE_HISTORY_LIMIT} messages\n"
+        config_info += f"**Message History Search Depth:** {MESSAGE_HISTORY_SEARCH_DEPTH} messages\n"
+        config_info += (
+            f"**Ask Command Cooldown:** {ASK_COMMAND_COOLDOWN_MINUTES} minutes\n"
+        )
+        config_info += f"**Max Stored Questions:** {MAX_STORED_QUESTIONS} questions\n\n"
+        config_info += "**Commands to modify:**\n"
+        config_info += (
+            "• `/sethistorylimit <number>` - Set message history limit (1-50)\n"
+        )
+        config_info += "• `/setsearchdepth <number>` - Set search depth (100-10000)\n"
+        config_info += "• `/config` - View current configuration"
+
+        await interaction.response.send_message(config_info, ephemeral=True)
+
+    except Exception as e:
+        await interaction.response.send_message(
+            f"❌ **Error viewing configuration**\n\n"
+            f"An error occurred: {str(e)[:200]}...",
             ephemeral=True,
         )
 
