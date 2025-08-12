@@ -190,9 +190,11 @@ async def try_gemini_models(question: str, context_string: str) -> Optional[str]
         "gemini-2.5-pro",  # Best quality, highest quota
         "gemini-2.5-flash",  # Good quality, medium quota
         "gemini-2.5-flash-lite",  # Basic quality, highest quota
+        "gemini-2.0-flash",  # Good quality, medium quota
+        "gemini-2.0-flash-lite",  # Basic quality, highest quota
     ]
 
-    thinking_budgets = [512, 256, 0]
+    thinking_budgets = [512, 256, 0, 0, 0]
 
     for i, (model_name, thinking_budget) in enumerate(
         zip(models_to_try, thinking_budgets)
