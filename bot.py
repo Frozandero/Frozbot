@@ -107,7 +107,7 @@ async def try_gemini_models(question: str, context_string: str) -> Optional[str]
         "gemini-2.5-flash-lite",  # Basic quality, highest quota
     ]
 
-    thinking_budgets = [256, 128, 0]
+    thinking_budgets = [512, 256, 0]
 
     for i, (model_name, thinking_budget) in enumerate(
         zip(models_to_try, thinking_budgets)
@@ -215,8 +215,8 @@ async def ask_command(interaction: discord.Interaction, question: str) -> None:
                 )
                 return
 
-        # Update cooldown timestamp
-        ASK_COMMAND_COOLDOWNS[user_id] = current_time
+        # Store the timestamp but don't apply cooldown yet - only apply if request succeeds
+        request_start_time = current_time
 
     # Cleanup expired cooldowns occasionally (every 10th request)
     if len(ASK_COMMAND_COOLDOWNS) > 100:  # Only cleanup when we have many entries
@@ -549,80 +549,29 @@ async def ask_command(interaction: discord.Interaction, question: str) -> None:
         )
 
         if response:
-            # Truncate response if it's too long (safety measure)
-            max_response_length = 1500  # Leave room for formatting
-            if len(response) > max_response_length:
-                # Try to truncate at a sentence boundary
-                truncated = response[:max_response_length]
-                last_period = truncated.rfind(".")
-                last_exclamation = truncated.rfind("!")
-                last_question = truncated.rfind("?")
+            # Update cooldown only on successful response
+            if user_id != owner_id:  # Only apply cooldown to non-owners
+                ASK_COMMAND_COOLDOWNS[user_id] = request_start_time
 
-                # Find the latest sentence ending
-                sentence_end = max(last_period, last_exclamation, last_question)
-
-                if (
-                    sentence_end > max_response_length * 0.8
-                ):  # Only use if we're not cutting too much
-                    response = response[: sentence_end + 1]
-                else:
-                    response = truncated.rstrip() + "..."
-
-                print(
-                    f"Response truncated from {len(response) + 3} to {len(response)} characters"
-                )
-
-            # Check if the response is too long for Discord (2000 character limit)
-            # Also check if question is too long and truncate if needed
-            safe_question = processed_question
-            if len(processed_question) > 500:  # Limit question length
-                safe_question = processed_question[:500].rstrip() + "..."
-
+            # Simple truncation: just cut at 2000 characters
             formatted_response = (
-                f"**Question:** {safe_question}\n\n**Answer:** {response}"
+                f"**Question:** {processed_question}\n\n**Answer:** {response}"
             )
 
             if len(formatted_response) <= 2000:
                 # Response fits in one message
                 await interaction.followup.send(content=formatted_response)
             else:
-                # Response is too long, split into multiple messages
-                # First message: Question
-                question_msg = f"**Question:** {safe_question}"
-                await interaction.followup.send(content=question_msg)
+                # Response is too long, truncate to fit in one message
+                # Calculate how much space we have for the answer
+                question_part = f"**Question:** {processed_question}\n\n**Answer:** "
+                max_answer_length = 2000 - len(question_part)
 
-                # Split answer into chunks of 1900 characters (leaving room for formatting)
-                answer_chunks = []
-                remaining_answer = response
+                # Truncate the answer to fit
+                truncated_answer = response[:max_answer_length].rstrip() + "..."
+                final_response = question_part + truncated_answer
 
-                while remaining_answer:
-                    if len(remaining_answer) <= 1900:
-                        chunk = remaining_answer
-                        remaining_answer = ""
-                    else:
-                        # Find the last space within 1900 characters to avoid breaking words
-                        chunk = remaining_answer[:1900]
-                        last_space = chunk.rfind(" ")
-                        if last_space > 0:
-                            chunk = remaining_answer[:last_space]
-                            remaining_answer = remaining_answer[last_space + 1 :]
-                        else:
-                            remaining_answer = remaining_answer[1900:]
-
-                    answer_chunks.append(chunk)
-
-                # Send answer chunks
-                for i, chunk in enumerate(answer_chunks):
-                    if i == 0:
-                        chunk_msg = f"**Answer:** {chunk}"
-                    else:
-                        chunk_msg = chunk
-
-                    # Add continuation indicator if there are more chunks
-                    if i < len(answer_chunks) - 1:
-                        chunk_msg += "\n\n*[Continued...]*"
-
-                    await interaction.followup.send(content=chunk_msg)
+                await interaction.followup.send(content=final_response)
         else:
             # All models failed with quota errors
             quota_error_msg = (
