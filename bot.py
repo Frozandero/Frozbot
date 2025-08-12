@@ -145,6 +145,7 @@ async def try_gemini_models(question: str, context_string: str) -> Optional[str]
 
 intents = discord.Intents.default()
 intents.message_content = True
+intents.members = True
 client = discord.Client(intents=intents)
 tree = app_commands.CommandTree(client)
 
