@@ -149,7 +149,6 @@ async def replace_guild_emojis_in_text(
             try:
                 if hasattr(e, "name") and e.name:
                     name_to_emoji[str(e.name).lower()] = e
-                    print(f"  ✅ Cached: :{e.name}: -> {e}")
             except Exception as emoji_error:
                 print(f"  ❌ Error processing cached emoji: {emoji_error}")
                 continue
@@ -166,7 +165,6 @@ async def replace_guild_emojis_in_text(
                     try:
                         if hasattr(e, "name") and e.name:
                             name_to_emoji[str(e.name).lower()] = e
-                            print(f"  ✅ Fetched: :{e.name}: -> {e}")
                     except Exception as emoji_error:
                         print(f"  ❌ Error processing fetched emoji: {emoji_error}")
                         continue
@@ -176,8 +174,6 @@ async def replace_guild_emojis_in_text(
 
         # Show final mapping
         print(f"🎯 Final emoji mapping: {len(name_to_emoji)} emojis available")
-        for name, emoji in name_to_emoji.items():
-            print(f"  :{name}: -> {emoji}")
 
         def _sub(m: re.Match) -> str:
             name = m.group(1)
@@ -185,7 +181,6 @@ async def replace_guild_emojis_in_text(
             if emoji:
                 try:
                     emoji_str = str(emoji)
-                    print(f"🔄 Replacing :{name}: with {emoji_str}")
                     return emoji_str
                 except Exception as e:
                     print(f"❌ Error converting emoji {emoji} to string: {e}")

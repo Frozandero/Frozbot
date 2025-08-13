@@ -12,6 +12,12 @@ Restart=always
 RestartSec=10
 StandardOutput=journal
 StandardError=journal
+# Log rotation settings
+LogRotateMaxBytes=1M
+LogRotateMaxFiles=1
+# Limit journal entries to prevent excessive logging
+LogRateLimitIntervalSec=1
+LogRateLimitBurst=1000
 
 [Install]
 WantedBy=multi-user.target
