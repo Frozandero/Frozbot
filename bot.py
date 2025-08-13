@@ -171,6 +171,9 @@ MESSAGE_HISTORY_SEARCH_DEPTH = int(
 
 # Channel context and summary settings
 CHANNEL_CONTEXT_LAST: int = int(os.getenv("CHANNEL_CONTEXT_LAST", "10"))
+CHANNEL_CONTEXT_INCLUDE_BOT_MESSAGES: bool = (
+    os.getenv("CHANNEL_CONTEXT_INCLUDE_BOT_MESSAGES", "false").lower() == "true"
+)
 CHANNEL_SUMMARY_DEPTH: int = int(os.getenv("CHANNEL_SUMMARY_DEPTH", "50"))
 CHANNEL_SUMMARY_ENABLE: bool = (
     os.getenv("CHANNEL_SUMMARY_ENABLE", "true").lower() == "true"
@@ -967,7 +970,10 @@ async def get_recent_channel_messages(
     results: list = []
     try:
         async for message in channel.history(limit=limit):  # type: ignore
-            if getattr(message.author, "bot", False):
+            if (
+                getattr(message.author, "bot", False)
+                and not CHANNEL_CONTEXT_INCLUDE_BOT_MESSAGES
+            ):
                 continue
             content = message.content.strip() if message.content else ""
             if len(content) > max_chars_per_message:
@@ -2016,11 +2022,13 @@ async def config_command(interaction: discord.Interaction) -> None:
         config_info += (
             f"**Ask Command Cooldown:** {ASK_COMMAND_COOLDOWN_MINUTES} minutes\n"
         )
+        config_info += f"**Imagine Command Cooldown:** {IMAGINE_COMMAND_COOLDOWN_MINUTES} minutes\n"
         config_info += f"**Max Stored Questions:** {MAX_STORED_QUESTIONS} questions\n\n"
         config_info += "**Image Generation:**\n"
         config_info += f"• Enabled: {IMAGINE_ENABLE}\n\n"
         config_info += "**Channel Context Settings:**\n"
         config_info += f"• Last raw messages: {CHANNEL_CONTEXT_LAST}\n"
+        config_info += f"• Include bot messages (raw context): {CHANNEL_CONTEXT_INCLUDE_BOT_MESSAGES}\n"
         config_info += f"• Summary enabled: {CHANNEL_SUMMARY_ENABLE}\n"
         config_info += f"• Summary depth: {CHANNEL_SUMMARY_DEPTH}\n"
         config_info += f"• Summary TTL: {CHANNEL_SUMMARY_TTL_MIN} min\n\n"
@@ -2029,6 +2037,8 @@ async def config_command(interaction: discord.Interaction) -> None:
             "• `/sethistorylimit <number>` - Set message history limit (1-50)\n"
         )
         config_info += "• `/setsearchdepth <number>` - Set search depth (100-10000)\n"
+        config_info += "• `/setimagineenabled <true|false>` - Toggle image generation\n"
+        config_info += "• `/setcontextincludebots <true|false>` - Include bot messages in raw context\n"
         config_info += "• `/config` - View current configuration"
 
         await interaction.response.send_message(config_info, ephemeral=True)
@@ -2072,6 +2082,47 @@ async def set_imagine_enabled_command(
         IMAGINE_ENABLE = bool(enabled)
         await interaction.response.send_message(
             f"✅ **Image Generation Updated**\n\nOld: {old_value}\nNew: {IMAGINE_ENABLE}",
+            ephemeral=True,
+        )
+    except Exception as e:
+        await interaction.response.send_message(
+            f"❌ **Error updating setting**\n\nAn error occurred: {str(e)[:200]}...",
+            ephemeral=True,
+        )
+
+
+# New setting: include bot messages in raw channel context
+@tree.command(
+    name="setcontextincludebots",
+    description="[Owner Only] Include or exclude bot messages in raw channel context (true/false or omit to view)",
+    guild=discord.Object(id=int(os.getenv("DEV_SERVER_ID", "0"))),
+)
+async def set_context_include_bots_command(
+    interaction: discord.Interaction, include: Optional[bool] = None
+) -> None:
+    """View or update inclusion of bot messages in the raw channel context (owner only)."""
+    try:
+        owner_id = int(os.getenv("OWNER_ID", "0"))
+        if interaction.user.id != owner_id:
+            await interaction.response.send_message(
+                "❌ **Access Denied**\n\nOnly the bot owner can change this setting.",
+                ephemeral=True,
+            )
+            return
+
+        global CHANNEL_CONTEXT_INCLUDE_BOT_MESSAGES
+
+        if include is None:
+            await interaction.response.send_message(
+                f"💬 **Include Bot Messages in Raw Context**\n\nCurrent: {CHANNEL_CONTEXT_INCLUDE_BOT_MESSAGES}",
+                ephemeral=True,
+            )
+            return
+
+        old_value = CHANNEL_CONTEXT_INCLUDE_BOT_MESSAGES
+        CHANNEL_CONTEXT_INCLUDE_BOT_MESSAGES = bool(include)
+        await interaction.response.send_message(
+            f"✅ **Raw Context Inclusion Updated**\n\nOld: {old_value}\nNew: {CHANNEL_CONTEXT_INCLUDE_BOT_MESSAGES}",
             ephemeral=True,
         )
     except Exception as e:
