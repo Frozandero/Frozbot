@@ -23,7 +23,7 @@ profanity.load_censor_words()
 
 def filter_profanity(text: str) -> str:
     """Filter profanity from text, replacing it with asterisks."""
-    return profanity.censor(text)
+    return profanity.censor(text, "■")
 
 
 MEAN_IQ: float = 100.0
