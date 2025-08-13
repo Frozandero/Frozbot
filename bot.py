@@ -30,6 +30,78 @@ def filter_profanity(text: str) -> str:
     return profanity.censor(text, "■")
 
 
+async def debug_guild_emoji_state(guild: Optional[discord.Guild]) -> str:
+    """Debug function to check the state of guild emojis and help troubleshoot issues."""
+    if not guild:
+        return "❌ No guild provided"
+
+    try:
+        debug_info = []
+        debug_info.append(f"🔍 **Guild Debug Info**")
+        debug_info.append(f"Guild ID: {getattr(guild, 'id', 'Unknown')}")
+        debug_info.append(f"Guild Name: {getattr(guild, 'name', 'Unknown')}")
+        debug_info.append(f"Guild Type: {type(guild)}")
+
+        # Check guild attributes
+        guild_attrs = ["emojis", "available", "unavailable", "chunked"]
+        for attr in guild_attrs:
+            try:
+                value = getattr(guild, attr, None)
+                debug_info.append(f"Guild.{attr}: {value}")
+            except Exception as e:
+                debug_info.append(f"Guild.{attr}: Error - {e}")
+
+        # Check emoji cache
+        try:
+            cached_emojis = getattr(guild, "emojis", [])
+            debug_info.append(f"📋 Cached Emojis: {len(cached_emojis)}")
+
+            if cached_emojis:
+                for i, emoji in enumerate(cached_emojis[:5]):  # Show first 5
+                    try:
+                        emoji_info = f"  {i+1}. :{getattr(emoji, 'name', 'Unknown')}: (ID: {getattr(emoji, 'id', 'Unknown')})"
+                        debug_info.append(emoji_info)
+                    except Exception as e:
+                        debug_info.append(f"  {i+1}. Error processing emoji: {e}")
+
+                if len(cached_emojis) > 5:
+                    debug_info.append(f"  ... and {len(cached_emojis) - 5} more")
+            else:
+                debug_info.append("  No cached emojis found")
+
+        except Exception as e:
+            debug_info.append(f"❌ Error checking cached emojis: {e}")
+
+        # Try to fetch emojis
+        try:
+            debug_info.append("🔄 Attempting to fetch emojis...")
+            fetched = await guild.fetch_emojis()
+            debug_info.append(f"📥 Fetched Emojis: {len(fetched)}")
+
+            if fetched:
+                for i, emoji in enumerate(fetched[:5]):  # Show first 5
+                    try:
+                        emoji_info = f"  {i+1}. :{getattr(emoji, 'name', 'Unknown')}: (ID: {getattr(emoji, 'id', 'Unknown')})"
+                        debug_info.append(emoji_info)
+                    except Exception as e:
+                        debug_info.append(
+                            f"  {i+1}. Error processing fetched emoji: {e}"
+                        )
+
+                if len(fetched) > 5:
+                    debug_info.append(f"  ... and {len(fetched) - 5} more")
+            else:
+                debug_info.append("  No emojis returned from fetch")
+
+        except Exception as e:
+            debug_info.append(f"❌ Error fetching emojis: {e}")
+
+        return "\n".join(debug_info)
+
+    except Exception as e:
+        return f"❌ Error in debug_guild_emoji_state: {e}"
+
+
 async def replace_guild_emojis_in_text(
     text: str, guild: Optional[discord.Guild]
 ) -> str:
@@ -41,43 +113,98 @@ async def replace_guild_emojis_in_text(
     if not text or guild is None:
         return text
 
+    # Validate that guild is a proper Discord guild object
+    if not hasattr(guild, "id") or not hasattr(guild, "emojis"):
+        print(
+            f"⚠️ Invalid guild object passed to replace_guild_emojis_in_text: {type(guild)}"
+        )
+        return text
+
+    # Additional validation: ensure guild is in a valid state
+    try:
+        guild_id = getattr(guild, "id", None)
+        if not guild_id:
+            print("⚠️ Guild object has no valid ID")
+            return text
+    except Exception as e:
+        print(f"⚠️ Error accessing guild ID: {e}")
+        return text
+
     # Match :name: not part of an existing custom emoji like <:name:id> or <a:name:id>
     pattern = re.compile(r"(?<!<)(?<!<a):([A-Za-z0-9_]{2,32}):")
     names_in_text = set(pattern.findall(text))
     if not names_in_text:
         return text
 
+    print(f"🔍 Found emoji names in text: {names_in_text}")
+
     # Build name -> emoji mapping (case-insensitive by name)
     name_to_emoji: Dict[str, Any] = {}
     try:
-        for e in getattr(guild, "emojis", []):
+        # First try to get emojis from cache
+        cached_emojis = getattr(guild, "emojis", [])
+        print(f"📋 Found {len(cached_emojis)} cached emojis in guild {guild_id}")
+
+        for e in cached_emojis:
             try:
-                if getattr(e, "name", None):
+                if hasattr(e, "name") and e.name:
                     name_to_emoji[str(e.name).lower()] = e
-            except Exception:
+                    print(f"  ✅ Cached: :{e.name}: -> {e}")
+            except Exception as emoji_error:
+                print(f"  ❌ Error processing cached emoji: {emoji_error}")
                 continue
 
+        # Check which emojis are missing from cache
         missing = {n for n in names_in_text if n.lower() not in name_to_emoji}
         if missing:
+            print(f"🔄 Fetching missing emojis: {missing}")
             try:
-                fetched = await guild.fetch_emojis()  # type: ignore
+                fetched = await guild.fetch_emojis()
+                print(f"📥 Fetched {len(fetched)} emojis from guild {guild_id}")
+
                 for e in fetched:
                     try:
-                        if getattr(e, "name", None):
+                        if hasattr(e, "name") and e.name:
                             name_to_emoji[str(e.name).lower()] = e
-                    except Exception:
+                            print(f"  ✅ Fetched: :{e.name}: -> {e}")
+                    except Exception as emoji_error:
+                        print(f"  ❌ Error processing fetched emoji: {emoji_error}")
                         continue
-            except Exception:
-                # Ignore fetch failures; we'll just skip replacements
-                pass
+            except Exception as fetch_error:
+                print(f"❌ Failed to fetch emojis from guild {guild_id}: {fetch_error}")
+                # Continue with cached emojis only
+
+        # Show final mapping
+        print(f"🎯 Final emoji mapping: {len(name_to_emoji)} emojis available")
+        for name, emoji in name_to_emoji.items():
+            print(f"  :{name}: -> {emoji}")
 
         def _sub(m: re.Match) -> str:
             name = m.group(1)
             emoji = name_to_emoji.get(name.lower())
-            return str(emoji) if emoji else m.group(0)
+            if emoji:
+                try:
+                    emoji_str = str(emoji)
+                    print(f"🔄 Replacing :{name}: with {emoji_str}")
+                    return emoji_str
+                except Exception as e:
+                    print(f"❌ Error converting emoji {emoji} to string: {e}")
+                    return m.group(0)
+            else:
+                print(f"⚠️ No emoji found for :{name}:")
+                return m.group(0)
 
-        return pattern.sub(_sub, text)
-    except Exception:
+        result = pattern.sub(_sub, text)
+        print(
+            f"✅ Emoji replacement complete. Original: {text[:100]}... -> Result: {result[:100]}..."
+        )
+        return result
+
+    except Exception as e:
+        print(f"❌ Unexpected error in replace_guild_emojis_in_text: {e}")
+        import traceback
+
+        traceback.print_exc()
         return text
 
 
@@ -91,26 +218,47 @@ async def list_guild_emoji_names(
     names: list[str] = []
     try:
         if guild is None:
+            print("⚠️ No guild provided to list_guild_emoji_names")
             return names
+
+        # Validate guild object
+        if not hasattr(guild, "id") or not hasattr(guild, "emojis"):
+            print(f"⚠️ Invalid guild object in list_guild_emoji_names: {type(guild)}")
+            return names
+
+        print(f"🔍 Listing emojis for guild {guild.id}")
+
         # Prefer cached list first
-        for e in getattr(guild, "emojis", []):
+        cached_emojis = getattr(guild, "emojis", [])
+        print(f"📋 Found {len(cached_emojis)} cached emojis")
+
+        for e in cached_emojis:
             try:
-                if getattr(e, "name", None):
+                if hasattr(e, "name") and e.name:
                     names.append(str(e.name))
-            except Exception:
+                    print(f"  ✅ Cached emoji: :{e.name}:")
+            except Exception as emoji_error:
+                print(f"  ❌ Error processing cached emoji: {emoji_error}")
                 continue
+
         # If empty, try fetching
         if not names:
+            print("🔄 No cached emojis found, attempting to fetch...")
             try:
-                fetched = await guild.fetch_emojis()  # type: ignore
+                fetched = await guild.fetch_emojis()
+                print(f"📥 Fetched {len(fetched)} emojis from guild {guild.id}")
+
                 for e in fetched:
                     try:
-                        if getattr(e, "name", None):
+                        if hasattr(e, "name") and e.name:
                             names.append(str(e.name))
-                    except Exception:
+                            print(f"  ✅ Fetched emoji: :{e.name}:")
+                    except Exception as emoji_error:
+                        print(f"  ❌ Error processing fetched emoji: {emoji_error}")
                         continue
-            except Exception:
-                pass
+            except Exception as fetch_error:
+                print(f"❌ Failed to fetch emojis from guild {guild.id}: {fetch_error}")
+
         # Deduplicate while preserving case on first occurrence
         seen_lower: set[str] = set()
         deduped: list[str] = []
@@ -120,11 +268,23 @@ async def list_guild_emoji_names(
                 continue
             seen_lower.add(nl)
             deduped.append(n)
+
         deduped.sort(key=lambda s: s.lower())
+
         if isinstance(max_total, int) and max_total > 0 and len(deduped) > max_total:
-            return deduped[:max_total]
-        return deduped
-    except Exception:
+            result = deduped[:max_total]
+            print(f"📊 Returning {len(result)} emojis (truncated from {len(deduped)})")
+        else:
+            result = deduped
+            print(f"📊 Returning {len(result)} emojis")
+
+        return result
+
+    except Exception as e:
+        print(f"❌ Unexpected error in list_guild_emoji_names: {e}")
+        import traceback
+
+        traceback.print_exc()
         return []
 
 
@@ -496,7 +656,14 @@ async def process_ask_request(request: QueuedRequest) -> None:
 
             # Replace :emoji_name: with actual guild emoji mentions
             async def _replace_emotes(text: str) -> str:
-                return await replace_guild_emojis_in_text(text, request.interaction.guild)  # type: ignore
+                guild = request.interaction.guild
+                if guild and hasattr(guild, "id") and hasattr(guild, "emojis"):
+                    return await replace_guild_emojis_in_text(text, guild)
+                else:
+                    print(
+                        f"⚠️ Invalid guild object in ask request, skipping emoji replacement"
+                    )
+                    return text
 
             replaced_answer = await _replace_emotes(response)
             formatted_response = (
@@ -768,9 +935,15 @@ async def process_retry_request(request: QueuedRequest) -> None:
         if response:
             # Format the response
             filtered_question = filter_profanity(request.question)
-            replaced_answer = await replace_guild_emojis_in_text(
-                response, request.interaction.guild
-            )  # type: ignore
+            # Replace :emoji_name: with actual guild emoji mentions
+            guild = request.interaction.guild
+            if guild and hasattr(guild, "id") and hasattr(guild, "emojis"):
+                replaced_answer = await replace_guild_emojis_in_text(response, guild)
+            else:
+                print(
+                    f"⚠️ Invalid guild object in retry request, skipping emoji replacement"
+                )
+                replaced_answer = response
             formatted_response = (
                 f"**Question:** {filtered_question}\n\n**Answer:** {replaced_answer}"
             )
@@ -1530,7 +1703,12 @@ async def ask_command(
 
     # Build context string as server instructions
     # List guild emoji names for the model to optionally use
-    emoji_names: list[str] = await list_guild_emoji_names(interaction.guild)
+    guild = interaction.guild
+    emoji_names: list[str] = []
+    if guild and hasattr(guild, "id") and hasattr(guild, "emojis"):
+        emoji_names = await list_guild_emoji_names(guild)
+    else:
+        print(f"⚠️ Invalid guild object in context building, skipping emoji listing")
     emoji_usage_instructions = "You can use custom server emojis by writing :emoji_name: in your answer; they will be converted to real emojis."
     emojis_context_line = "Guild Custom Emojis: " + (
         ", ".join(f":{n}:" for n in emoji_names) if emoji_names else "None"
@@ -1806,8 +1984,17 @@ async def imagine_command(
         display_text = returned_text.strip()
         if display_text:
             try:
-                display_text = await replace_guild_emojis_in_text(display_text, interaction.guild)  # type: ignore
-            except Exception:
+                guild = interaction.guild
+                if guild and hasattr(guild, "id") and hasattr(guild, "emojis"):
+                    display_text = await replace_guild_emojis_in_text(
+                        display_text, guild
+                    )
+                else:
+                    print(
+                        f"⚠️ Invalid guild object in imagine command, skipping emoji replacement"
+                    )
+            except Exception as e:
+                print(f"⚠️ Error during emoji replacement in imagine command: {e}")
                 pass
 
         header = f"**Prompt:** {filtered_prompt}\n\n"
@@ -2109,6 +2296,7 @@ async def config_command(interaction: discord.Interaction) -> None:
         config_info += "• `/setsearchdepth <number>` - Set search depth (100-10000)\n"
         config_info += "• `/setimagineenabled <true|false>` - Toggle image generation\n"
         config_info += "• `/setcontextincludebots <true|false>` - Include bot messages in raw context\n"
+        config_info += "• `/debugemojis` - Debug emoji replacement issues\n"
         config_info += "• `/config` - View current configuration"
 
         await interaction.response.send_message(config_info, ephemeral=True)
@@ -2116,6 +2304,65 @@ async def config_command(interaction: discord.Interaction) -> None:
     except Exception as e:
         await interaction.response.send_message(
             f"❌ **Error viewing configuration**\n\n"
+            f"An error occurred: {str(e)[:200]}...",
+            ephemeral=True,
+        )
+
+
+@tree.command(
+    name="debugemojis",
+    description="[Owner Only] Debug emoji replacement issues in the current guild.",
+    guild=discord.Object(id=int(os.getenv("DEV_SERVER_ID", "0"))),
+)
+async def debug_emojis_command(interaction: discord.Interaction) -> None:
+    """Debug emoji replacement issues (owner only)."""
+    try:
+        # Check if the user is the bot owner
+        owner_id = int(os.getenv("OWNER_ID", "0"))
+        if interaction.user.id != owner_id:
+            await interaction.response.send_message(
+                "❌ **Access Denied**\n\n" "Only the bot owner can debug emoji issues.",
+                ephemeral=True,
+            )
+            return
+
+        await interaction.response.defer(ephemeral=True)
+
+        # Get debug info for the current guild
+        guild = interaction.guild
+        if not guild:
+            await interaction.followup.send(
+                "❌ **No Guild Context**\n\n" "This command must be used in a server.",
+                ephemeral=True,
+            )
+            return
+
+        debug_info = await debug_guild_emoji_state(guild)
+
+        # Test emoji replacement with a sample text
+        test_text = "Testing emoji replacement: :test: :smile: :cool:"
+        print(f"🧪 Testing emoji replacement with: {test_text}")
+
+        replaced_text = await replace_guild_emojis_in_text(test_text, guild)
+
+        test_result = f"🧪 **Emoji Replacement Test**\n\n"
+        test_result += f"**Test Text:** {test_text}\n"
+        test_result += f"**Result:** {replaced_text}\n\n"
+
+        full_debug = debug_info + "\n\n" + test_result
+
+        # Split if too long for Discord
+        if len(full_debug) > 2000:
+            await interaction.followup.send(
+                content=debug_info[:1997] + "...", ephemeral=True
+            )
+            await interaction.followup.send(content=test_result, ephemeral=True)
+        else:
+            await interaction.followup.send(content=full_debug, ephemeral=True)
+
+    except Exception as e:
+        await interaction.followup.send(
+            f"❌ **Error debugging emojis**\n\n"
             f"An error occurred: {str(e)[:200]}...",
             ephemeral=True,
         )
