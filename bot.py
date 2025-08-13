@@ -1,4 +1,5 @@
 import os
+import re
 import hashlib
 import random
 import datetime
@@ -24,6 +25,57 @@ profanity.load_censor_words()
 def filter_profanity(text: str) -> str:
     """Filter profanity from text, replacing it with asterisks."""
     return profanity.censor(text, "■")
+
+
+async def replace_guild_emojis_in_text(
+    text: str, guild: Optional[discord.Guild]
+) -> str:
+    """Replace :emoji_name: occurrences with actual guild custom emoji mentions.
+
+    Looks up emojis by name in the provided guild. If not found in cache,
+    attempts a fetch. If still not found, leaves the token unchanged.
+    """
+    if not text or guild is None:
+        return text
+
+    # Match :name: not part of an existing custom emoji like <:name:id> or <a:name:id>
+    pattern = re.compile(r"(?<!<)(?<!<a):([A-Za-z0-9_]{2,32}):")
+    names_in_text = set(pattern.findall(text))
+    if not names_in_text:
+        return text
+
+    # Build name -> emoji mapping (case-insensitive by name)
+    name_to_emoji: Dict[str, Any] = {}
+    try:
+        for e in getattr(guild, "emojis", []):
+            try:
+                if getattr(e, "name", None):
+                    name_to_emoji[str(e.name).lower()] = e
+            except Exception:
+                continue
+
+        missing = {n for n in names_in_text if n.lower() not in name_to_emoji}
+        if missing:
+            try:
+                fetched = await guild.fetch_emojis()  # type: ignore
+                for e in fetched:
+                    try:
+                        if getattr(e, "name", None):
+                            name_to_emoji[str(e.name).lower()] = e
+                    except Exception:
+                        continue
+            except Exception:
+                # Ignore fetch failures; we'll just skip replacements
+                pass
+
+        def _sub(m: re.Match) -> str:
+            name = m.group(1)
+            emoji = name_to_emoji.get(name.lower())
+            return str(emoji) if emoji else m.group(0)
+
+        return pattern.sub(_sub, text)
+    except Exception:
+        return text
 
 
 MEAN_IQ: float = 100.0
@@ -278,17 +330,23 @@ async def process_ask_request(request: QueuedRequest) -> None:
 
             # Format the response
             filtered_question = filter_profanity(request.question)
+
+            # Replace :emoji_name: with actual guild emoji mentions
+            async def _replace_emotes(text: str) -> str:
+                return await replace_guild_emojis_in_text(text, request.interaction.guild)  # type: ignore
+
+            replaced_answer = await _replace_emotes(response)
             formatted_response = (
-                f"**Question:** {filtered_question}\n\n**Answer:** {response}"
+                f"**Question:** {filtered_question}\n\n**Answer:** {replaced_answer}"
             )
 
             if len(formatted_response) <= 2000:
                 await request.interaction.followup.send(content=formatted_response)
             else:
-                # Truncate if too long
+                # Truncate if too long (use already-replaced answer to respect final length)
                 question_part = f"**Question:** {filtered_question}\n\n**Answer:** "
                 max_answer_length = 2000 - len(question_part)
-                truncated_answer = response[:max_answer_length].rstrip() + "..."
+                truncated_answer = replaced_answer[:max_answer_length].rstrip() + "..."
                 final_response = question_part + truncated_answer
                 await request.interaction.followup.send(content=final_response)
 
@@ -474,8 +532,11 @@ async def process_retry_request(request: QueuedRequest) -> None:
         if response:
             # Format the response
             filtered_question = filter_profanity(request.question)
+            replaced_answer = await replace_guild_emojis_in_text(
+                response, request.interaction.guild
+            )  # type: ignore
             formatted_response = (
-                f"**Question:** {filtered_question}\n\n**Answer:** {response}"
+                f"**Question:** {filtered_question}\n\n**Answer:** {replaced_answer}"
             )
 
             if len(formatted_response) <= 2000:
@@ -484,7 +545,7 @@ async def process_retry_request(request: QueuedRequest) -> None:
                 # Truncate if too long
                 question_part = f"**Question:** {filtered_question}\n\n**Answer:** "
                 max_answer_length = 2000 - len(question_part)
-                truncated_answer = response[:max_answer_length].rstrip() + "..."
+                truncated_answer = replaced_answer[:max_answer_length].rstrip() + "..."
                 final_response = question_part + truncated_answer
                 await request.interaction.followup.send(content=final_response)
 
