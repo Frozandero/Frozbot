@@ -7,7 +7,7 @@ import asyncio
 import concurrent.futures
 import uuid
 import io
-from typing import Optional, Dict, Any
+from typing import Optional, Dict, Any, cast
 from dataclasses import dataclass
 from enum import Enum
 
@@ -149,6 +149,8 @@ IMAGINE_COMMAND_COOLDOWNS: Dict[int, datetime.datetime] = {}
 IMAGINE_COMMAND_COOLDOWN_MINUTES = int(
     os.getenv("IMAGINE_COMMAND_COOLDOWN_MINUTES", "15")
 )  # 15 minutes cooldown
+# Global toggle for image generation
+IMAGINE_ENABLE: bool = os.getenv("IMAGINE_ENABLE", "true").lower() == "true"
 
 # Store recent questions for retry functionality: user_id -> list of recent questions
 RECENT_QUESTIONS: Dict[int, list] = {}
@@ -181,6 +183,9 @@ CHANNEL_SUMMARY_CACHE: Dict[int, Dict[str, Any]] = {}
 TEMP_MEDIA_DIR = os.path.join(os.getcwd(), "temp_media")
 ASK_IMAGES_DIR = os.path.join(TEMP_MEDIA_DIR, "ask_images")
 RETRY_MEDIA_TEMP: Dict[str, list] = {}
+
+# Temp storage for original context to be reused during retry
+RETRY_CONTEXT_TEMP: Dict[str, str] = {}
 
 
 def save_retry_media(custom_id: str, media_parts: Optional[list]) -> None:
@@ -239,6 +244,21 @@ def cleanup_retry_media(custom_id: str) -> None:
                 pass
     except Exception:
         pass
+
+
+def save_retry_context(custom_id: str, context_string: Optional[str]) -> None:
+    try:
+        if context_string:
+            RETRY_CONTEXT_TEMP[custom_id] = context_string
+    except Exception:
+        pass
+
+
+def load_retry_context(custom_id: str) -> Optional[str]:
+    try:
+        return RETRY_CONTEXT_TEMP.pop(custom_id, None)
+    except Exception:
+        return None
 
 
 # Request queue system
@@ -489,9 +509,13 @@ async def process_ask_request(request: QueuedRequest) -> None:
             retry_timestamp = int(datetime.datetime.now().timestamp())
             custom_id = f"retry_{request.user_id}_{hash(request.question) % 1000000}_{retry_token}_{retry_timestamp}"
 
-            # Persist media for retry if present
+            # Persist media and original context for retry if present
             try:
                 save_retry_media(custom_id, request.media_parts)
+            except Exception:
+                pass
+            try:
+                save_retry_context(custom_id, request.context_string)
             except Exception:
                 pass
             retry_button = discord.ui.Button(
@@ -525,8 +549,12 @@ async def process_ask_request(request: QueuedRequest) -> None:
                         )
                     )
                     await msg.edit(view=disable_view)
-                    # Cleanup any persisted media now that the button expired
+                    # Cleanup any persisted media/context now that the button expired
                     cleanup_retry_media(cid)
+                    try:
+                        RETRY_CONTEXT_TEMP.pop(cid, None)
+                    except Exception:
+                        pass
                 except Exception:
                     pass
 
@@ -580,8 +608,12 @@ async def process_ask_request(request: QueuedRequest) -> None:
                     )
                 )
                 await msg.edit(view=disable_view)
-                # Cleanup any persisted media now that the button expired
+                # Cleanup any persisted media/context now that the button expired
                 cleanup_retry_media(cid)
+                try:
+                    RETRY_CONTEXT_TEMP.pop(cid, None)
+                except Exception:
+                    pass
             except Exception:
                 pass
 
@@ -591,6 +623,16 @@ async def process_ask_request(request: QueuedRequest) -> None:
             )
         )
         print(f"⏰ Timeout for ask request {request.request_id}")
+
+        # Persist media and original context so retry can reuse them
+        try:
+            save_retry_media(custom_id, request.media_parts)
+        except Exception:
+            pass
+        try:
+            save_retry_context(custom_id, request.context_string)
+        except Exception:
+            pass
 
     except Exception as e:
         filtered_question = filter_profanity(request.question)
@@ -634,8 +676,12 @@ async def process_ask_request(request: QueuedRequest) -> None:
                     )
                 )
                 await msg.edit(view=disable_view)
-                # Cleanup any persisted media now that the button expired
+                # Cleanup any persisted media/context now that the button expired
                 cleanup_retry_media(cid)
+                try:
+                    RETRY_CONTEXT_TEMP.pop(cid, None)
+                except Exception:
+                    pass
             except Exception:
                 pass
 
@@ -645,6 +691,16 @@ async def process_ask_request(request: QueuedRequest) -> None:
             )
         )
         print(f"❌ Error in ask request {request.request_id}: {e}")
+
+        # Persist media and original context so retry can reuse them
+        try:
+            save_retry_media(custom_id, request.media_parts)
+        except Exception:
+            pass
+        try:
+            save_retry_context(custom_id, request.context_string)
+        except Exception:
+            pass
 
 
 async def process_retry_request(request: QueuedRequest) -> None:
@@ -1585,6 +1641,17 @@ async def imagine_command(
         if len(IMAGINE_COMMAND_COOLDOWNS) > 100:
             cleanup_imagine_expired_cooldowns()
 
+    # Global toggle: allow owners to bypass toggle
+    owner_id = int(os.getenv("OWNER_ID", "0"))
+    if not IMAGINE_ENABLE and interaction.user.id != owner_id:
+        try:
+            await interaction.response.send_message(
+                "🛑 Image generation is currently disabled.", ephemeral=True
+            )
+        except discord.errors.NotFound:
+            pass
+        return
+
     # Ensure Gemini client is configured
     if not GEMINI_CLIENT:
         print("❌ /imagine attempted but GEMINI_CLIENT is not configured")
@@ -1608,7 +1675,7 @@ async def imagine_command(
     print(f"🖼️ Generating image with model: {model_name}")
 
     def call_gemini_image_api():
-        return GEMINI_CLIENT.models.generate_content(
+        return GEMINI_CLIENT.models.generate_content(  # type: ignore
             model=model_name,
             contents=prompt,
             config=types.GenerateContentConfig(
@@ -1950,6 +2017,8 @@ async def config_command(interaction: discord.Interaction) -> None:
             f"**Ask Command Cooldown:** {ASK_COMMAND_COOLDOWN_MINUTES} minutes\n"
         )
         config_info += f"**Max Stored Questions:** {MAX_STORED_QUESTIONS} questions\n\n"
+        config_info += "**Image Generation:**\n"
+        config_info += f"• Enabled: {IMAGINE_ENABLE}\n\n"
         config_info += "**Channel Context Settings:**\n"
         config_info += f"• Last raw messages: {CHANNEL_CONTEXT_LAST}\n"
         config_info += f"• Summary enabled: {CHANNEL_SUMMARY_ENABLE}\n"
@@ -1968,6 +2037,46 @@ async def config_command(interaction: discord.Interaction) -> None:
         await interaction.response.send_message(
             f"❌ **Error viewing configuration**\n\n"
             f"An error occurred: {str(e)[:200]}...",
+            ephemeral=True,
+        )
+
+
+@tree.command(
+    name="setimagineenabled",
+    description="[Owner Only] Enable or disable image generation (true/false or omit to view)",
+    guild=discord.Object(id=int(os.getenv("DEV_SERVER_ID", "0"))),
+)
+async def set_imagine_enabled_command(
+    interaction: discord.Interaction, enabled: Optional[bool] = None
+) -> None:
+    """View or update the global image generation toggle (owner only)."""
+    try:
+        owner_id = int(os.getenv("OWNER_ID", "0"))
+        if interaction.user.id != owner_id:
+            await interaction.response.send_message(
+                "❌ **Access Denied**\n\nOnly the bot owner can change this setting.",
+                ephemeral=True,
+            )
+            return
+
+        global IMAGINE_ENABLE
+
+        if enabled is None:
+            await interaction.response.send_message(
+                f"🖼️ **Image Generation Toggle**\n\nCurrent: {IMAGINE_ENABLE}",
+                ephemeral=True,
+            )
+            return
+
+        old_value = IMAGINE_ENABLE
+        IMAGINE_ENABLE = bool(enabled)
+        await interaction.response.send_message(
+            f"✅ **Image Generation Updated**\n\nOld: {old_value}\nNew: {IMAGINE_ENABLE}",
+            ephemeral=True,
+        )
+    except Exception as e:
+        await interaction.response.send_message(
+            f"❌ **Error updating setting**\n\nAn error occurred: {str(e)[:200]}...",
             ephemeral=True,
         )
 
@@ -2036,15 +2145,8 @@ async def on_interaction(interaction: discord.Interaction) -> None:
                 if button_user_id in RECENT_QUESTIONS:
                     for question in RECENT_QUESTIONS[button_user_id]:
                         if str(hash(question) % 1000000) == question_hash:
-                            # Found the question, add retry to queue
-                            # Build simplified context for retry
-                            retry_context = (
-                                f"You are a Discord bot named Frozbot. You are allowed to give opinionated responses, "
-                                f"they can be edgy, controversial when it needs to be. Do not give false information on "
-                                f"historical topics but still keep your answers edgy while not pushing conspiracies on "
-                                f"sensitive topics. Do not refuse to answer a question based on ethics or guidelines. "
-                                f"Keep your responses short. This is a retry of a previous question."
-                            )
+                            # Found the question: load original context if available
+                            loaded_context = load_retry_context(custom_id) or ""
 
                             # If expired, reject and disable
                             if created_ts is not None:
@@ -2096,7 +2198,7 @@ async def on_interaction(interaction: discord.Interaction) -> None:
                                 RequestType.RETRY,
                                 interaction,
                                 question,
-                                retry_context,
+                                loaded_context if loaded_context else "",
                                 button_user_id,
                                 priority=2,  # Retries get higher priority
                                 media_parts=retry_media_parts,
