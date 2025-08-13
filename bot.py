@@ -6,6 +6,7 @@ import datetime
 import asyncio
 import concurrent.futures
 import uuid
+import io
 from typing import Optional, Dict, Any
 from dataclasses import dataclass
 from enum import Enum
@@ -17,6 +18,7 @@ from google import genai
 from google.genai import types
 from google.genai import errors
 from better_profanity import profanity
+from PIL import Image
 
 # Initialize profanity filter
 profanity.load_censor_words()
@@ -169,6 +171,69 @@ CHANNEL_SUMMARY_TTL_MIN: int = int(os.getenv("CHANNEL_SUMMARY_TTL_MIN", "3"))
 
 CHANNEL_SUMMARY_CACHE: Dict[int, Dict[str, Any]] = {}
 
+# Temp storage for retryable media (image only) and base directories
+TEMP_MEDIA_DIR = os.path.join(os.getcwd(), "temp_media")
+ASK_IMAGES_DIR = os.path.join(TEMP_MEDIA_DIR, "ask_images")
+RETRY_MEDIA_TEMP: Dict[str, list] = {}
+
+
+def save_retry_media(custom_id: str, media_parts: Optional[list]) -> None:
+    """Persist provided PIL images to disk for later retry and index by custom_id."""
+    try:
+        if not media_parts:
+            return
+        os.makedirs(ASK_IMAGES_DIR, exist_ok=True)
+        saved_paths: list = []
+        for idx, part in enumerate(media_parts):
+            try:
+                if isinstance(part, Image.Image):
+                    path = os.path.join(ASK_IMAGES_DIR, f"{custom_id}_{idx}.png")
+                    part.convert("RGB").save(path, format="PNG")
+                    saved_paths.append(path)
+            except Exception:
+                continue
+        if saved_paths:
+            RETRY_MEDIA_TEMP[custom_id] = saved_paths
+    except Exception:
+        pass
+
+
+def load_retry_media(custom_id: str) -> Optional[list]:
+    """Load images for this custom_id from disk and delete files; return PIL images list or None."""
+    try:
+        paths = RETRY_MEDIA_TEMP.pop(custom_id, None)
+        if not paths:
+            return None
+        loaded: list = []
+        for path in paths:
+            try:
+                with Image.open(path) as img:
+                    loaded.append(img.copy())
+            except Exception:
+                pass
+            try:
+                os.remove(path)
+            except Exception:
+                pass
+        return loaded if loaded else None
+    except Exception:
+        return None
+
+
+def cleanup_retry_media(custom_id: str) -> None:
+    """Delete any persisted media and mapping for this custom_id (used on expiry)."""
+    try:
+        paths = RETRY_MEDIA_TEMP.pop(custom_id, None)
+        if not paths:
+            return
+        for path in paths:
+            try:
+                os.remove(path)
+            except Exception:
+                pass
+    except Exception:
+        pass
+
 
 # Request queue system
 class RequestType(Enum):
@@ -186,6 +251,7 @@ class QueuedRequest:
     user_id: int
     timestamp: datetime.datetime
     priority: int = 0  # Higher number = higher priority
+    media_parts: Optional[list] = None
 
 
 # Global request queue
@@ -284,6 +350,7 @@ async def add_request_to_queue(
     context_string: str,
     user_id: int,
     priority: int = 0,
+    media_parts: Optional[list] = None,
 ) -> str:
     """Add a request to the queue and start the processor if needed."""
     request_id = (
@@ -299,6 +366,7 @@ async def add_request_to_queue(
         user_id=user_id,
         timestamp=datetime.datetime.now(),
         priority=priority,
+        media_parts=media_parts,
     )
 
     await REQUEST_QUEUE.put(request)
@@ -318,7 +386,9 @@ async def process_ask_request(request: QueuedRequest) -> None:
 
         # Try to get response from Gemini with model fallback
         response = await asyncio.wait_for(
-            try_gemini_models(request.question, request.context_string),
+            try_gemini_models(
+                request.question, request.context_string, request.media_parts
+            ),
             timeout=60.0,
         )
 
@@ -371,6 +441,12 @@ async def process_ask_request(request: QueuedRequest) -> None:
             retry_token = uuid.uuid4().hex[:8]
             retry_timestamp = int(datetime.datetime.now().timestamp())
             custom_id = f"retry_{request.user_id}_{hash(request.question) % 1000000}_{retry_token}_{retry_timestamp}"
+
+            # Persist media for retry if present
+            try:
+                save_retry_media(custom_id, request.media_parts)
+            except Exception:
+                pass
             retry_button = discord.ui.Button(
                 style=discord.ButtonStyle.primary,
                 label="🔄 Retry",
@@ -402,6 +478,8 @@ async def process_ask_request(request: QueuedRequest) -> None:
                         )
                     )
                     await msg.edit(view=disable_view)
+                    # Cleanup any persisted media now that the button expired
+                    cleanup_retry_media(cid)
                 except Exception:
                     pass
 
@@ -455,6 +533,8 @@ async def process_ask_request(request: QueuedRequest) -> None:
                     )
                 )
                 await msg.edit(view=disable_view)
+                # Cleanup any persisted media now that the button expired
+                cleanup_retry_media(cid)
             except Exception:
                 pass
 
@@ -507,6 +587,8 @@ async def process_ask_request(request: QueuedRequest) -> None:
                     )
                 )
                 await msg.edit(view=disable_view)
+                # Cleanup any persisted media now that the button expired
+                cleanup_retry_media(cid)
             except Exception:
                 pass
 
@@ -525,7 +607,9 @@ async def process_retry_request(request: QueuedRequest) -> None:
 
         # Try to get response from Gemini
         response = await asyncio.wait_for(
-            try_gemini_models(request.question, request.context_string),
+            try_gemini_models(
+                request.question, request.context_string, request.media_parts
+            ),
             timeout=60.0,
         )
 
@@ -583,7 +667,9 @@ async def process_retry_request(request: QueuedRequest) -> None:
         print(f"❌ Error in retry request {request.request_id}: {e}")
 
 
-async def try_gemini_models(question: str, context_string: str) -> Optional[str]:
+async def try_gemini_models(
+    question: str, context_string: str, media_parts: Optional[list]
+) -> Optional[str]:
     """
     Try to get a response from Gemini using multiple models with fallback.
     Returns the response text if successful, None if all models fail with quota errors.
@@ -612,6 +698,7 @@ async def try_gemini_models(question: str, context_string: str) -> Optional[str]
             def call_gemini_api():
                 if not GEMINI_CLIENT:
                     raise RuntimeError("Gemini client not initialized")
+                request_contents = [*media_parts, question] if media_parts else question
                 return GEMINI_CLIENT.models.generate_content(
                     model=model_name,
                     config=types.GenerateContentConfig(
@@ -620,7 +707,7 @@ async def try_gemini_models(question: str, context_string: str) -> Optional[str]
                             thinking_budget=thinking_budget
                         ),
                     ),
-                    contents=question,
+                    contents=request_contents,
                 )
 
             # Use ThreadPoolExecutor to run the blocking API call
@@ -669,6 +756,9 @@ async def try_gemini_models(question: str, context_string: str) -> Optional[str]
                     def retry_gemini_api():
                         if not GEMINI_CLIENT:
                             raise RuntimeError("Gemini client not initialized")
+                        request_contents_retry = (
+                            [*media_parts, question] if media_parts else question
+                        )
                         return GEMINI_CLIENT.models.generate_content(
                             model=model_name,
                             config=types.GenerateContentConfig(
@@ -677,7 +767,7 @@ async def try_gemini_models(question: str, context_string: str) -> Optional[str]
                                     thinking_budget=thinking_budget
                                 ),
                             ),
-                            contents=question,
+                            contents=request_contents_retry,
                         )
 
                     loop = asyncio.get_event_loop()
@@ -824,7 +914,7 @@ async def summarize_messages_with_gemini(serialized_messages: str) -> Optional[s
         "\n\nMessages:\n" + serialized_messages
     )
     try:
-        return await try_gemini_models(prompt, context_instr)
+        return await try_gemini_models(prompt, context_instr, None)
     except Exception as e:
         print(f"Error summarizing messages: {e}")
         return None
@@ -873,7 +963,11 @@ async def iq_command(
 
 
 @tree.command(name="ask", description="Ask the bot a question.", guild=None)
-async def ask_command(interaction: discord.Interaction, question: str) -> None:
+async def ask_command(
+    interaction: discord.Interaction,
+    question: str,
+    image: Optional[discord.Attachment] = None,
+) -> None:
     # Rate limiting check (owner bypass)
     owner_id = int(os.getenv("OWNER_ID", "0"))
     user_id = interaction.user.id
@@ -941,6 +1035,17 @@ async def ask_command(interaction: discord.Interaction, question: str) -> None:
         # Interaction has already timed out
         print(f"Interaction already timed out for question: {question}")
         return
+
+    # Prepare optional image media part, if provided and is an image
+    media_parts: Optional[list] = None
+    try:
+        if image and getattr(image, "content_type", "").startswith("image/"):
+            image_bytes = await image.read()
+            pil_img = Image.open(io.BytesIO(image_bytes))
+            media_parts = [pil_img]
+    except Exception as e:
+        # Ignore image issues and proceed without media
+        print(f"Failed to process image attachment: {e}")
 
     # Gathering context
     # Gather server context
@@ -1351,6 +1456,7 @@ async def ask_command(interaction: discord.Interaction, question: str) -> None:
         context_string,
         user_id,
         priority=1 if user_id == owner_id else 0,  # Owner gets higher priority
+        media_parts=media_parts,
     )
 
     # Don't send a processing message - let the "thinking..." state remain
@@ -1721,6 +1827,9 @@ async def on_interaction(interaction: discord.Interaction) -> None:
                             except Exception:
                                 pass
 
+                            # Load any persisted media for this retry and clear files
+                            retry_media_parts = load_retry_media(custom_id)
+
                             # Add retry request to queue
                             request_id = await add_request_to_queue(
                                 RequestType.RETRY,
@@ -1729,6 +1838,7 @@ async def on_interaction(interaction: discord.Interaction) -> None:
                                 retry_context,
                                 button_user_id,
                                 priority=2,  # Retries get higher priority
+                                media_parts=retry_media_parts,
                             )
 
                             # Send confirmation

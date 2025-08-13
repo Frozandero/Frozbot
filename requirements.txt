@@ -2,3 +2,4 @@ discord.py>=2.3.2,<3
 python-dotenv>=1.0.1,<2
 google-genai>=0.10.0,<2
 better_profanity>=0.7.0,<2
+Pillow>=10,<12
