@@ -478,17 +478,14 @@ async def process_ask_request(request: QueuedRequest) -> None:
                 else:
                     await request.interaction.followup.send(content=formatted_response)
             else:
-                # Truncate if too long (use already-replaced answer to respect final length)
-                question_part = f"**Question:** {filtered_question}\n\n**Answer:** "
-                max_answer_length = 2000 - len(question_part)
-                truncated_answer = replaced_answer[:max_answer_length].rstrip() + "..."
-                final_response = question_part + truncated_answer
                 if files_param:
                     await request.interaction.followup.send(
-                        content=final_response, files=files_param
+                        content=formatted_response[:1997] + "...", files=files_param
                     )
                 else:
-                    await request.interaction.followup.send(content=final_response)
+                    await request.interaction.followup.send(
+                        content=formatted_response[:1997] + "..."
+                    )
 
             print(f"✅ Successfully processed ask request {request.request_id}")
         else:
