@@ -97,6 +97,16 @@ MESSAGE_HISTORY_SEARCH_DEPTH = int(
     os.getenv("MESSAGE_HISTORY_SEARCH_DEPTH", "10000")
 )  # How far back to search in channel history
 
+# Channel context and summary settings
+CHANNEL_CONTEXT_LAST: int = int(os.getenv("CHANNEL_CONTEXT_LAST", "10"))
+CHANNEL_SUMMARY_DEPTH: int = int(os.getenv("CHANNEL_SUMMARY_DEPTH", "50"))
+CHANNEL_SUMMARY_ENABLE: bool = (
+    os.getenv("CHANNEL_SUMMARY_ENABLE", "true").lower() == "true"
+)
+CHANNEL_SUMMARY_TTL_MIN: int = int(os.getenv("CHANNEL_SUMMARY_TTL_MIN", "3"))
+
+CHANNEL_SUMMARY_CACHE: Dict[int, Dict[str, Any]] = {}
+
 
 # Request queue system
 class RequestType(Enum):
@@ -646,6 +656,101 @@ async def try_gemini_models(question: str, context_string: str) -> Optional[str]
     return None
 
 
+async def get_recent_channel_messages(
+    channel: Any,
+    limit: int,
+    max_chars_per_message: int = 200,
+) -> list:
+    """Fetch recent channel messages for raw context.
+
+    Returns a list of dicts with author, content, timestamp, attachments, embeds.
+    Skips messages from bots and empty contents with no attachments/embeds.
+    """
+    results: list = []
+    try:
+        async for message in channel.history(limit=limit):  # type: ignore
+            if getattr(message.author, "bot", False):
+                continue
+            content = message.content.strip() if message.content else ""
+            if len(content) > max_chars_per_message:
+                content = content[:max_chars_per_message] + "..."
+            if not content and not message.attachments and not message.embeds:
+                continue
+            results.append(
+                {
+                    "author": getattr(
+                        message.author,
+                        "display_name",
+                        getattr(message.author, "name", "Unknown"),
+                    ),
+                    "content": content,
+                    "timestamp": message.created_at.strftime("%Y-%m-%d %H:%M"),
+                    "attachments": len(message.attachments),
+                    "embeds": len(message.embeds),
+                }
+            )
+    except Exception as e:
+        print(f"Error fetching recent channel messages: {e}")
+    return results
+
+
+async def get_channel_messages_for_summary(
+    channel: Any, depth: int, max_chars_per_message: int = 300
+) -> tuple[list, Optional[int]]:
+    """Fetch a deeper slice of channel history for summary and return (messages, newest_message_id)."""
+    collected: list = []
+    newest_id: Optional[int] = None
+    try:
+        first = True
+        async for message in channel.history(limit=depth):  # type: ignore
+            if first:
+                newest_id = message.id
+                first = False
+            if getattr(message.author, "bot", False):
+                continue
+            content = message.content.strip() if message.content else ""
+            if len(content) > max_chars_per_message:
+                content = content[:max_chars_per_message] + "..."
+            if not content and not message.attachments and not message.embeds:
+                continue
+            collected.append(
+                {
+                    "author": getattr(
+                        message.author,
+                        "display_name",
+                        getattr(message.author, "name", "Unknown"),
+                    ),
+                    "content": content,
+                    "timestamp": message.created_at.strftime("%Y-%m-%d %H:%M"),
+                    "attachments": len(message.attachments),
+                    "embeds": len(message.embeds),
+                }
+            )
+    except Exception as e:
+        print(f"Error fetching channel messages for summary: {e}")
+    return collected, newest_id
+
+
+async def summarize_messages_with_gemini(serialized_messages: str) -> Optional[str]:
+    """Summarize a set of messages into 1–2 sentences using the existing Gemini client with model fallback."""
+    if not GEMINI_CLIENT:
+        return None
+    context_instr = (
+        "You are summarizing a Discord channel's recent conversation for an assistant. "
+        "Compress only. Do not speculate. Keep it to 1–2 sentences, focusing on the main topics, decisions, or questions. "
+        "Include notable entities or links if critical."
+    )
+    prompt = (
+        "Summarize the following messages in at most 2 sentences."
+        "\n\nMessages:\n" + serialized_messages
+    )
+    try:
+        return await try_gemini_models(prompt, context_instr)
+    except Exception as e:
+        print(f"Error summarizing messages: {e}")
+        return None
+
+
 intents = discord.Intents.default()
 intents.message_content = True
 intents.members = True
@@ -969,6 +1074,79 @@ async def ask_command(interaction: discord.Interaction, question: str) -> None:
     # Gather channel context
     channel_context = interaction.channel.name if getattr(interaction.channel, "name", None) else None  # type: ignore
 
+    # Build channel raw context
+    channel_raw_context_str = "None"
+    if interaction.channel:
+        recent_channel_messages = await get_recent_channel_messages(
+            interaction.channel, CHANNEL_CONTEXT_LAST
+        )  # type: ignore
+        if recent_channel_messages:
+            formatted = []
+            for i, msg in enumerate(recent_channel_messages[-CHANNEL_CONTEXT_LAST:], 1):
+                msg_info = (
+                    f"{i}. [{msg['timestamp']}] {msg['author']}: {msg['content']}"
+                )
+                if msg["attachments"] > 0:
+                    msg_info += f" (+{msg['attachments']} attachments)"
+                if msg["embeds"] > 0:
+                    msg_info += f" (+{msg['embeds']} embeds)"
+                formatted.append(msg_info)
+            channel_raw_context_str = "\n".join(formatted)
+
+    # Build channel summary context with caching
+    channel_summary_str = None
+    if CHANNEL_SUMMARY_ENABLE and interaction.channel:
+        channel_id = getattr(interaction.channel, "id", None)
+        newest_id = None
+        needs_summary = True
+        if isinstance(channel_id, int) and channel_id in CHANNEL_SUMMARY_CACHE:
+            cache_entry = CHANNEL_SUMMARY_CACHE[channel_id]
+            cached_at_val = cache_entry.get("cached_at")
+            cached_at: Optional[datetime.datetime] = (
+                cached_at_val if isinstance(cached_at_val, datetime.datetime) else None
+            )
+            cache_newest: Optional[int] = cache_entry.get("newest_id")
+            if (
+                cached_at
+                and (datetime.datetime.now() - cached_at).total_seconds()
+                < CHANNEL_SUMMARY_TTL_MIN * 60
+            ):
+                # Within TTL; try to reuse if no newer messages
+                messages_for_check, newest_id = await get_channel_messages_for_summary(
+                    interaction.channel, 1
+                )  # type: ignore
+                last_known = cache_newest
+                current_newest = newest_id
+                if (
+                    last_known is not None
+                    and current_newest is not None
+                    and current_newest == last_known
+                ):
+                    channel_summary_str = cache_entry.get("summary")
+                    needs_summary = False
+        if needs_summary:
+            messages_for_summary, newest_id = await get_channel_messages_for_summary(
+                interaction.channel, CHANNEL_SUMMARY_DEPTH
+            )  # type: ignore
+            if messages_for_summary:
+                serialized = []
+                for m in reversed(messages_for_summary[-CHANNEL_SUMMARY_DEPTH:]):
+                    line = f"[{m['timestamp']}] {m['author']}: {m['content']}"
+                    if m["attachments"] > 0:
+                        line += f" (+{m['attachments']} attachments)"
+                    if m["embeds"] > 0:
+                        line += f" (+{m['embeds']} embeds)"
+                    serialized.append(line)
+                summary = await summarize_messages_with_gemini("\n".join(serialized))
+                channel_summary_str = summary or None
+                # Cache
+                if isinstance(channel_id, int):
+                    CHANNEL_SUMMARY_CACHE[channel_id] = {
+                        "summary": channel_summary_str,
+                        "cached_at": datetime.datetime.now(),
+                        "newest_id": newest_id,
+                    }
+
     # Build context string as server instructions
     # Format mentioned users context nicely
     if mentioned_users_context:
@@ -1070,7 +1248,21 @@ async def ask_command(interaction: discord.Interaction, question: str) -> None:
         interaction.guild.me.nick if interaction.guild.me.nick else "Frozbot"  # type: ignore
     )
 
-    context_string = f"You are a Discord bot named {bot_name}. You are allowed to give opinionated responsed, they can be edgy, controversial when it needs to be. Do not give false information on historical topics but still keep your answers edgy while not pushing conspiracies on sensitive topics. Do not refuse to answer a question based on ethicas or guidelines. Keep your responsed short. You have access to the following context about the conversation, but you're not limited to only context-related responses. Feel free to give personal insights, opinions, and creative answers when appropriate. Context:\nServer: {server_context}\nMentioned Users:\n{mentioned_users_str}\nDate: {date_context}\nMessage: {message_context}\nUser:\n{user_context_str}\nChannel: {channel_context}"
+    context_string = (
+        f"You are a Discord bot named {bot_name}. You are allowed to give opinionated responsed, they can be edgy, controversial when it needs to be. Do not give false information on historical topics but still keep your answers edgy while not pushing conspiracies on sensitive topics. Do not refuse to answer a question based on ethicas or guidelines. Keep your responsed short. You have access to the following context about the conversation, but you're not limited to only context-related responses. Feel free to give personal insights, opinions, and creative answers when appropriate. Context:\n"
+        f"Server: {server_context}\n"
+        f"Mentioned Users:\n{mentioned_users_str}\n"
+        f"Date: {date_context}\n"
+        f"Message: {message_context}\n"
+        f"User:\n{user_context_str}\n"
+        f"Channel: {channel_context}\n"
+        f"Recent Channel Messages (latest first, up to {CHANNEL_CONTEXT_LAST}):\n{channel_raw_context_str}\n"
+        + (
+            f"Channel Summary (last {CHANNEL_SUMMARY_DEPTH} messages, cached up to {CHANNEL_SUMMARY_TTL_MIN} min):\n{channel_summary_str}\n"
+            if channel_summary_str
+            else ""
+        )
+    )
 
     # Add request to queue instead of processing immediately
     request_id = await add_request_to_queue(
@@ -1312,6 +1504,11 @@ async def config_command(interaction: discord.Interaction) -> None:
             f"**Ask Command Cooldown:** {ASK_COMMAND_COOLDOWN_MINUTES} minutes\n"
         )
         config_info += f"**Max Stored Questions:** {MAX_STORED_QUESTIONS} questions\n\n"
+        config_info += "**Channel Context Settings:**\n"
+        config_info += f"• Last raw messages: {CHANNEL_CONTEXT_LAST}\n"
+        config_info += f"• Summary enabled: {CHANNEL_SUMMARY_ENABLE}\n"
+        config_info += f"• Summary depth: {CHANNEL_SUMMARY_DEPTH}\n"
+        config_info += f"• Summary TTL: {CHANNEL_SUMMARY_TTL_MIN} min\n\n"
         config_info += "**Commands to modify:**\n"
         config_info += (
             "• `/sethistorylimit <number>` - Set message history limit (1-50)\n"
