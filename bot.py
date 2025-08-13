@@ -15,6 +15,16 @@ from dotenv import load_dotenv
 from google import genai
 from google.genai import types
 from google.genai import errors
+from better_profanity import profanity
+
+# Initialize profanity filter
+profanity.load_censor_words()
+
+
+def filter_profanity(text: str) -> str:
+    """Filter profanity from text, replacing it with asterisks."""
+    return profanity.censor(text)
+
 
 MEAN_IQ: float = 100.0
 STDDEV_IQ: float = 15.0
@@ -267,15 +277,16 @@ async def process_ask_request(request: QueuedRequest) -> None:
                 ASK_COMMAND_COOLDOWNS[request.user_id] = datetime.datetime.now()
 
             # Format the response
+            filtered_question = filter_profanity(request.question)
             formatted_response = (
-                f"**Question:** {request.question}\n\n**Answer:** {response}"
+                f"**Question:** {filtered_question}\n\n**Answer:** {response}"
             )
 
             if len(formatted_response) <= 2000:
                 await request.interaction.followup.send(content=formatted_response)
             else:
                 # Truncate if too long
-                question_part = f"**Question:** {request.question}\n\n**Answer:** "
+                question_part = f"**Question:** {filtered_question}\n\n**Answer:** "
                 max_answer_length = 2000 - len(question_part)
                 truncated_answer = response[:max_answer_length].rstrip() + "..."
                 final_response = question_part + truncated_answer
@@ -284,6 +295,7 @@ async def process_ask_request(request: QueuedRequest) -> None:
             print(f"✅ Successfully processed ask request {request.request_id}")
         else:
             # All models failed
+            filtered_question = filter_profanity(request.question)
             all_failed_msg = (
                 "🚫 **All AI Models Failed**\n\n"
                 "The bot was unable to process your request with any available AI model. "
@@ -292,7 +304,7 @@ async def process_ask_request(request: QueuedRequest) -> None:
                 "• Temporary server errors\n"
                 "• Service maintenance\n"
                 "• Network connectivity issues\n\n"
-                "**Question:** " + request.question + "\n\n"
+                "**Question:** " + filtered_question + "\n\n"
                 "**Status:** Unable to process request\n\n"
                 "Please try again later or contact the bot owner if the problem persists."
             )
@@ -343,9 +355,10 @@ async def process_ask_request(request: QueuedRequest) -> None:
             print(f"❌ All models failed for ask request {request.request_id}")
 
     except asyncio.TimeoutError:
+        filtered_question = filter_profanity(request.question)
         timeout_msg = (
             f"⏰ **Request timed out**\n\n"
-            f"**Question:** {request.question}\n\n"
+            f"**Question:** {filtered_question}\n\n"
             "The AI model took too long to respond. Please try again with a simpler question or try again later."
         )
 
@@ -395,9 +408,10 @@ async def process_ask_request(request: QueuedRequest) -> None:
         print(f"⏰ Timeout for ask request {request.request_id}")
 
     except Exception as e:
+        filtered_question = filter_profanity(request.question)
         error_msg = (
             f"❌ **An error occurred while processing your question**\n\n"
-            f"**Question:** {request.question}\n\n"
+            f"**Question:** {filtered_question}\n\n"
             f"**Error:** {str(e)[:200]}...\n\n"
             "Please try again later or contact the bot owner if the problem persists."
         )
@@ -459,15 +473,16 @@ async def process_retry_request(request: QueuedRequest) -> None:
 
         if response:
             # Format the response
+            filtered_question = filter_profanity(request.question)
             formatted_response = (
-                f"**Question:** {request.question}\n\n**Answer:** {response}"
+                f"**Question:** {filtered_question}\n\n**Answer:** {response}"
             )
 
             if len(formatted_response) <= 2000:
                 await request.interaction.followup.send(content=formatted_response)
             else:
                 # Truncate if too long
-                question_part = f"**Question:** {request.question}\n\n**Answer:** "
+                question_part = f"**Question:** {filtered_question}\n\n**Answer:** "
                 max_answer_length = 2000 - len(question_part)
                 truncated_answer = response[:max_answer_length].rstrip() + "..."
                 final_response = question_part + truncated_answer
@@ -476,28 +491,31 @@ async def process_retry_request(request: QueuedRequest) -> None:
             print(f"✅ Successfully processed retry request {request.request_id}")
         else:
             # All models failed
+            filtered_question = filter_profanity(request.question)
             await request.interaction.followup.send(
                 "🚫 **Retry Failed**\n\n"
                 "The retry attempt also failed. All AI models are currently unavailable.\n\n"
-                "**Question:** " + request.question,
+                "**Question:** " + filtered_question,
                 ephemeral=True,
             )
             print(f"❌ All models failed for retry request {request.request_id}")
 
     except asyncio.TimeoutError:
+        filtered_question = filter_profanity(request.question)
         await request.interaction.followup.send(
             f"⏰ **Retry Timed Out**\n\n"
             f"The retry attempt timed out.\n\n"
-            f"**Question:** {request.question}",
+            f"**Question:** {filtered_question}",
             ephemeral=True,
         )
         print(f"⏰ Timeout for retry request {request.request_id}")
 
     except Exception as e:
+        filtered_question = filter_profanity(request.question)
         await request.interaction.followup.send(
             f"❌ **Retry Error**\n\n"
             f"An error occurred during the retry attempt.\n\n"
-            f"**Question:** {request.question}\n"
+            f"**Question:** {filtered_question}\n"
             f"**Error:** {str(e)[:200]}...",
             ephemeral=True,
         )
@@ -1654,9 +1672,10 @@ async def on_interaction(interaction: discord.Interaction) -> None:
 
                             # Send confirmation
                             queue_position = REQUEST_QUEUE.qsize()
+                            filtered_question = filter_profanity(question)
                             await interaction.response.send_message(
                                 f"🔄 **Retry queued**\n\n"
-                                f"**Question:** {question}\n\n"
+                                f"**Question:** {filtered_question}\n\n"
                                 f"Your retry request has been added to the queue (position: {queue_position}). "
                                 f"It will be processed shortly.",
                                 ephemeral=True,
