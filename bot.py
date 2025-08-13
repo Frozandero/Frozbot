@@ -410,15 +410,41 @@ async def process_ask_request(request: QueuedRequest) -> None:
                 f"**Question:** {filtered_question}\n\n**Answer:** {replaced_answer}"
             )
 
+            # Prepare optional image attachment for visibility
+            files_param = None
+            try:
+                if request.media_parts:
+                    for part in request.media_parts:
+                        if isinstance(part, Image.Image):
+                            img_buf = io.BytesIO()
+                            part.convert("RGB").save(img_buf, format="PNG")
+                            img_buf.seek(0)
+                            files_param = [
+                                discord.File(img_buf, filename="question.png")
+                            ]
+                            break
+            except Exception:
+                files_param = None
+
             if len(formatted_response) <= 2000:
-                await request.interaction.followup.send(content=formatted_response)
+                if files_param:
+                    await request.interaction.followup.send(
+                        content=formatted_response, files=files_param
+                    )
+                else:
+                    await request.interaction.followup.send(content=formatted_response)
             else:
                 # Truncate if too long (use already-replaced answer to respect final length)
                 question_part = f"**Question:** {filtered_question}\n\n**Answer:** "
                 max_answer_length = 2000 - len(question_part)
                 truncated_answer = replaced_answer[:max_answer_length].rstrip() + "..."
                 final_response = question_part + truncated_answer
-                await request.interaction.followup.send(content=final_response)
+                if files_param:
+                    await request.interaction.followup.send(
+                        content=final_response, files=files_param
+                    )
+                else:
+                    await request.interaction.followup.send(content=final_response)
 
             print(f"✅ Successfully processed ask request {request.request_id}")
         else:
@@ -623,15 +649,41 @@ async def process_retry_request(request: QueuedRequest) -> None:
                 f"**Question:** {filtered_question}\n\n**Answer:** {replaced_answer}"
             )
 
+            # Prepare optional image attachment for retry visibility
+            files_param = None
+            try:
+                if request.media_parts:
+                    for part in request.media_parts:
+                        if isinstance(part, Image.Image):
+                            img_buf = io.BytesIO()
+                            part.convert("RGB").save(img_buf, format="PNG")
+                            img_buf.seek(0)
+                            files_param = [
+                                discord.File(img_buf, filename="question.png")
+                            ]
+                            break
+            except Exception:
+                files_param = None
+
             if len(formatted_response) <= 2000:
-                await request.interaction.followup.send(content=formatted_response)
+                if files_param:
+                    await request.interaction.followup.send(
+                        content=formatted_response, files=files_param
+                    )
+                else:
+                    await request.interaction.followup.send(content=formatted_response)
             else:
                 # Truncate if too long
                 question_part = f"**Question:** {filtered_question}\n\n**Answer:** "
                 max_answer_length = 2000 - len(question_part)
                 truncated_answer = replaced_answer[:max_answer_length].rstrip() + "..."
                 final_response = question_part + truncated_answer
-                await request.interaction.followup.send(content=final_response)
+                if files_param:
+                    await request.interaction.followup.send(
+                        content=final_response, files=files_param
+                    )
+                else:
+                    await request.interaction.followup.send(content=final_response)
 
             print(f"✅ Successfully processed retry request {request.request_id}")
         else:
