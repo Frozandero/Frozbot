@@ -17,6 +17,7 @@ from dotenv import load_dotenv
 from google import genai
 from google.genai import types
 from google.genai import errors
+from google.genai.types import Tool, UrlContext
 from better_profanity import profanity
 from PIL import Image
 
@@ -136,6 +137,7 @@ IS_DEV_SERVER_COMMAND: Optional[discord.Object] = (
     else None
 )
 
+URL_CONTEXT_TOOL = Tool(url_context=UrlContext())
 GEMINI_CLIENT = genai.Client() if os.getenv("GEMINI_API_KEY") else None
 
 # Rate limiting for ask command: user_id -> last_used_timestamp
@@ -815,7 +817,15 @@ async def try_gemini_models(
         "gemini-2.0-flash-lite",  # Basic quality, highest quota
     ]
 
+    tools_for_supporting_models = [URL_CONTEXT_TOOL]
     thinking_budgets = [512, 256, 0, 0, 0]
+    tools = [
+        tools_for_supporting_models,
+        tools_for_supporting_models,
+        tools_for_supporting_models,
+        tools_for_supporting_models,
+        [],
+    ]
 
     for i, (model_name, thinking_budget) in enumerate(
         zip(models_to_try, thinking_budgets)
@@ -835,6 +845,7 @@ async def try_gemini_models(
                         thinking_config=types.ThinkingConfig(
                             thinking_budget=thinking_budget
                         ),
+                        tools=tools[i],
                     ),
                     contents=request_contents,
                 )
