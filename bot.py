@@ -1425,24 +1425,30 @@ async def ask_command(
                 cached_at_val if isinstance(cached_at_val, datetime.datetime) else None
             )
             cache_newest: Optional[int] = cache_entry.get("newest_id")
+            # Always check if there have been new messages since the last summary.
+            # If not, reuse the cached summary regardless of TTL.
+            try:
+                _, newest_id = await get_channel_messages_for_summary(
+                    interaction.channel, 1
+                )  # type: ignore
+            except Exception:
+                newest_id = None
             if (
-                cached_at
+                cache_newest is not None
+                and newest_id is not None
+                and newest_id == cache_newest
+            ):
+                channel_summary_str = cache_entry.get("summary")
+                needs_summary = False
+            elif (
+                newest_id is None
+                and cached_at
                 and (datetime.datetime.now() - cached_at).total_seconds()
                 < CHANNEL_SUMMARY_TTL_MIN * 60
             ):
-                # Within TTL; try to reuse if no newer messages
-                messages_for_check, newest_id = await get_channel_messages_for_summary(
-                    interaction.channel, 1
-                )  # type: ignore
-                last_known = cache_newest
-                current_newest = newest_id
-                if (
-                    last_known is not None
-                    and current_newest is not None
-                    and current_newest == last_known
-                ):
-                    channel_summary_str = cache_entry.get("summary")
-                    needs_summary = False
+                # Fallback: if we cannot verify newest message id but TTL is valid, reuse cache
+                channel_summary_str = cache_entry.get("summary")
+                needs_summary = False
         if needs_summary:
             messages_for_summary, newest_id = await get_channel_messages_for_summary(
                 interaction.channel, CHANNEL_SUMMARY_DEPTH
