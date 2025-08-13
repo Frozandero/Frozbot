@@ -91,10 +91,10 @@ RETRY_BUTTON_EXPIRE_MINUTES = int(os.getenv("RETRY_BUTTON_EXPIRE_MINUTES", "5"))
 
 # Configurable message history settings
 MESSAGE_HISTORY_LIMIT = int(
-    os.getenv("MESSAGE_HISTORY_LIMIT", "5")
+    os.getenv("MESSAGE_HISTORY_LIMIT", "10")
 )  # Number of recent messages to fetch per user
 MESSAGE_HISTORY_SEARCH_DEPTH = int(
-    os.getenv("MESSAGE_HISTORY_SEARCH_DEPTH", "1000")
+    os.getenv("MESSAGE_HISTORY_SEARCH_DEPTH", "10000")
 )  # How far back to search in channel history
 
 
@@ -649,7 +649,7 @@ async def try_gemini_models(question: str, context_string: str) -> Optional[str]
 intents = discord.Intents.default()
 intents.message_content = True
 intents.members = True
-client = discord.Client(intents=intents)
+client = discord.Client(intents=intents, max_messages=10000)
 tree = app_commands.CommandTree(client)
 
 
