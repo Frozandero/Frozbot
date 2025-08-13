@@ -144,6 +144,12 @@ ASK_COMMAND_COOLDOWN_MINUTES = int(
     os.getenv("ASK_COMMAND_COOLDOWN_MINUTES", "30")
 )  # 30 minutes cooldown
 
+# Rate limiting for imagine command: user_id -> last_used_timestamp
+IMAGINE_COMMAND_COOLDOWNS: Dict[int, datetime.datetime] = {}
+IMAGINE_COMMAND_COOLDOWN_MINUTES = int(
+    os.getenv("IMAGINE_COMMAND_COOLDOWN_MINUTES", "15")
+)  # 15 minutes cooldown
+
 # Store recent questions for retry functionality: user_id -> list of recent questions
 RECENT_QUESTIONS: Dict[int, list] = {}
 MAX_STORED_QUESTIONS = 5  # Keep last 5 questions per user
@@ -278,6 +284,21 @@ def cleanup_expired_cooldowns() -> None:
         # Also cleanup recent questions for expired users
         if user_id in RECENT_QUESTIONS:
             del RECENT_QUESTIONS[user_id]
+
+
+def cleanup_imagine_expired_cooldowns() -> None:
+    """Remove expired cooldown entries for the imagine command."""
+    current_time = datetime.datetime.now()
+    expired_users: list[int] = []
+
+    for user_id, last_used in IMAGINE_COMMAND_COOLDOWNS.items():
+        time_diff = current_time - last_used
+        minutes_passed = time_diff.total_seconds() / 60
+        if minutes_passed >= IMAGINE_COMMAND_COOLDOWN_MINUTES:
+            expired_users.append(user_id)
+
+    for user_id in expired_users:
+        del IMAGINE_COMMAND_COOLDOWNS[user_id]
 
 
 def store_user_question(user_id: int, question: str) -> None:
@@ -1516,6 +1537,194 @@ async def ask_command(
     print(f"📋 Request {request_id} added to queue")
 
 
+@tree.command(
+    name="imagine",
+    description="Generate an image from a prompt using Gemini.",
+    guild=None,
+)
+async def imagine_command(
+    interaction: discord.Interaction,
+    prompt: str,
+) -> None:
+    """Create an image from text using Gemini image generation and send it as an attachment.
+
+    - Uses model: gemini-2.0-flash-preview-image-generation
+    - Includes the original prompt in the response
+    - No retry/fallback queue; handled directly in this command
+    """
+    # Owner bypass and rate limiting
+    owner_id = int(os.getenv("OWNER_ID", "0"))
+    user_id = interaction.user.id
+
+    # Log request start
+    try:
+        print(f"🎨 /imagine request from user {user_id}: {prompt[:60]}...")
+    except Exception:
+        pass
+
+    if user_id != owner_id:
+        now = datetime.datetime.now()
+        if user_id in IMAGINE_COMMAND_COOLDOWNS:
+            last_used = IMAGINE_COMMAND_COOLDOWNS[user_id]
+            minutes_passed = (now - last_used).total_seconds() / 60
+            if minutes_passed < IMAGINE_COMMAND_COOLDOWN_MINUTES:
+                remaining = int(IMAGINE_COMMAND_COOLDOWN_MINUTES - minutes_passed)
+                print(
+                    f"⏰ /imagine rate-limited for user {user_id}. Remaining: {remaining} min"
+                )
+                try:
+                    await interaction.response.send_message(
+                        f"⏰ Rate limit: You can only generate images once every {IMAGINE_COMMAND_COOLDOWN_MINUTES} minutes. Please wait {remaining} more minutes.",
+                        ephemeral=True,
+                    )
+                except discord.errors.NotFound:
+                    pass
+                return
+
+        # Occasional cleanup to avoid unbounded growth
+        if len(IMAGINE_COMMAND_COOLDOWNS) > 100:
+            cleanup_imagine_expired_cooldowns()
+
+    # Ensure Gemini client is configured
+    if not GEMINI_CLIENT:
+        print("❌ /imagine attempted but GEMINI_CLIENT is not configured")
+        try:
+            await interaction.response.send_message(
+                "The bot is not configured to use Gemini AI. Please contact the server owner.",
+                ephemeral=True,
+            )
+        except discord.errors.NotFound:
+            return
+        return
+
+    # Defer to allow time for generation
+    try:
+        await interaction.response.defer(thinking=True)
+    except discord.errors.NotFound:
+        return
+
+    # Call Gemini image generation in a worker thread to avoid blocking the event loop
+    model_name = "gemini-2.0-flash-preview-image-generation"
+    print(f"🖼️ Generating image with model: {model_name}")
+
+    def call_gemini_image_api():
+        return GEMINI_CLIENT.models.generate_content(
+            model=model_name,
+            contents=prompt,
+            config=types.GenerateContentConfig(
+                response_modalities=["TEXT", "IMAGE"],
+            ),
+        )
+
+    try:
+        loop = asyncio.get_event_loop()
+        with concurrent.futures.ThreadPoolExecutor() as executor:
+            response = await asyncio.wait_for(
+                loop.run_in_executor(executor, call_gemini_image_api),
+                timeout=60.0,
+            )
+
+        # Extract text and the first image from the response
+        returned_text: str = ""
+        image_buffer: Optional[io.BytesIO] = None
+
+        try:
+            candidates = getattr(response, "candidates", [])
+            if candidates:
+                parts = getattr(candidates[0].content, "parts", [])
+                for part in parts:
+                    if getattr(part, "text", None):
+                        returned_text += (part.text or "") + "\n"
+                    elif (
+                        getattr(part, "inline_data", None) is not None
+                        and image_buffer is None
+                    ):
+                        data = part.inline_data.data  # bytes for Python SDK
+                        # Load via PIL and re-encode as PNG for Discord
+                        try:
+                            img = Image.open(io.BytesIO(data))
+                            buf = io.BytesIO()
+                            img.convert("RGB").save(buf, format="PNG")
+                            buf.seek(0)
+                            image_buffer = buf
+                        except Exception:
+                            # Fall back to raw bytes if PIL fails
+                            buf = io.BytesIO()
+                            buf.write(data)
+                            buf.seek(0)
+                            image_buffer = buf
+        except Exception:
+            pass
+
+        # Build message content (include the original prompt)
+        filtered_prompt = filter_profanity(prompt)
+
+        # Replace guild emojis if the model returned text
+        display_text = returned_text.strip()
+        if display_text:
+            try:
+                display_text = await replace_guild_emojis_in_text(display_text, interaction.guild)  # type: ignore
+            except Exception:
+                pass
+
+        header = f"**Prompt:** {filtered_prompt}\n\n"
+        if display_text:
+            content = header + f"**Notes:** {display_text}"
+        else:
+            content = header + "Generating image..."
+
+        if image_buffer is not None:
+            file = discord.File(image_buffer, filename="imagine.png")
+            # Ensure content fits Discord's 2000 char limit
+            if len(content) > 2000:
+                content = content[:1997] + "..."
+            await interaction.followup.send(content=content, file=file)
+            # On success, record cooldown (non-owner only)
+            if user_id != owner_id:
+                IMAGINE_COMMAND_COOLDOWNS[user_id] = datetime.datetime.now()
+                print(
+                    f"✅ /imagine success for user {user_id}; cooldown set to {IMAGINE_COMMAND_COOLDOWN_MINUTES} min"
+                )
+            else:
+                print(f"✅ /imagine success for owner {user_id}; cooldown bypassed")
+        else:
+            # No image was returned; inform the user
+            msg = (
+                header
+                + "No image was returned by the model. Please try a different prompt."
+            )
+            if len(msg) > 2000:
+                msg = msg[:1997] + "..."
+            await interaction.followup.send(content=msg)
+            print(f"⚠️ /imagine returned no image for user {user_id}")
+
+    except asyncio.TimeoutError:
+        await interaction.followup.send(
+            "⏰ Image generation timed out. Please try again later.", ephemeral=True
+        )
+        print(f"⏰ /imagine timeout for user {user_id}: {prompt[:60]}...")
+    except errors.APIError as e:
+        await interaction.followup.send(
+            f"❌ Image generation API error ({e.code}): {str(e)[:180]}...",
+            ephemeral=True,
+        )
+        try:
+            print(
+                f"❌ /imagine API error for user {user_id} (code {e.code}): {str(e)[:200]}..."
+            )
+        except Exception:
+            pass
+    except Exception as e:
+        await interaction.followup.send(
+            f"❌ Unexpected error during image generation: {str(e)[:180]}...",
+            ephemeral=True,
+        )
+        try:
+            print(f"❌ /imagine unexpected error for user {user_id}: {str(e)[:200]}...")
+        except Exception:
+            pass
+
+
 @tree.command(name="queue", description="Check the current queue status.", guild=None)
 async def queue_command(interaction: discord.Interaction) -> None:
     """Show the current queue status."""
@@ -1954,9 +2163,6 @@ async def refresh_commands(interaction: discord.Interaction) -> None:
 
     try:
         await interaction.response.defer(ephemeral=True)
-    except discord.errors.NotFound:
-        print("Interaction not found when deferring refresh command")
-        return
 
         # Clear commands from the specific guild first
         if GUILD_ID_ENV:
@@ -1987,6 +2193,9 @@ async def refresh_commands(interaction: discord.Interaction) -> None:
                     "Interaction not found when sending global refresh success message"
                 )
                 return
+    except discord.errors.NotFound:
+        print("Interaction not found when deferring refresh command")
+        return
 
     except Exception as e:
         try:

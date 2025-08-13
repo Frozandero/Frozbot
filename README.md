@@ -67,6 +67,7 @@ python bot.py
 #### User Commands
 - `/iq [user]` - Get the IQ of a user (or yourself if no user specified)
 - `/ask <question>` - Ask the bot a question using AI
+- `/imagine <prompt>` - Generate an image from a text prompt using Gemini image generation
 - `/queue` - Check the current request queue status
 
 #### Owner Commands
@@ -82,6 +83,7 @@ The bot supports several configurable parameters that can be set via environment
 - **Message History Limit**: Number of recent messages to fetch per user (default: 5)
 - **Message History Search Depth**: How far back to search in channel history (default: 1000)
 - **Ask Command Cooldown**: Rate limiting for non-owner users (default: 30 minutes)
+- **Imagine Command Cooldown**: Rate limiting for non-owner users (default: 15 minutes)
 
 ### Notes
 - This bot requires the Message Content intent for AI chat functionality.
