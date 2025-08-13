@@ -1,0 +1,13 @@
+# Memory System Dependencies
+# These are in addition to your existing bot requirements
+
+# SQLite3 is included with Python standard library
+# No additional packages needed for basic functionality
+
+# Optional: For enhanced memory search capabilities
+# sentence-transformers==2.2.2  # For semantic search (uncomment if you want vector embeddings)
+# numpy==1.24.3  # Required by sentence-transformers
+# torch==2.0.1  # Required by sentence-transformers
+
+# Optional: For better memory analysis
+# scikit-learn==1.3.0  # For clustering and similarity (uncomment if needed)
