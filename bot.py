@@ -81,6 +81,53 @@ async def replace_guild_emojis_in_text(
         return text
 
 
+async def list_guild_emoji_names(
+    guild: Optional[discord.Guild], max_total: Optional[int] = None
+) -> list[str]:
+    """Return a list of custom emoji names available in the guild.
+
+    If `max_total` is provided, the list will be truncated to that length.
+    """
+    names: list[str] = []
+    try:
+        if guild is None:
+            return names
+        # Prefer cached list first
+        for e in getattr(guild, "emojis", []):
+            try:
+                if getattr(e, "name", None):
+                    names.append(str(e.name))
+            except Exception:
+                continue
+        # If empty, try fetching
+        if not names:
+            try:
+                fetched = await guild.fetch_emojis()  # type: ignore
+                for e in fetched:
+                    try:
+                        if getattr(e, "name", None):
+                            names.append(str(e.name))
+                    except Exception:
+                        continue
+            except Exception:
+                pass
+        # Deduplicate while preserving case on first occurrence
+        seen_lower: set[str] = set()
+        deduped: list[str] = []
+        for n in names:
+            nl = n.lower()
+            if nl in seen_lower:
+                continue
+            seen_lower.add(nl)
+            deduped.append(n)
+        deduped.sort(key=lambda s: s.lower())
+        if isinstance(max_total, int) and max_total > 0 and len(deduped) > max_total:
+            return deduped[:max_total]
+        return deduped
+    except Exception:
+        return []
+
+
 MEAN_IQ: float = 100.0
 STDDEV_IQ: float = 15.0
 
@@ -137,7 +184,7 @@ IS_DEV_SERVER_COMMAND: Optional[discord.Object] = (
     else None
 )
 
-URL_CONTEXT_TOOL = Tool(url_context=UrlContext())
+URL_CONTEXT_TOOL = Tool(url_context=UrlContext())  # type: ignore
 GEMINI_CLIENT = genai.Client() if os.getenv("GEMINI_API_KEY") else None
 
 # Rate limiting for ask command: user_id -> last_used_timestamp
@@ -1066,6 +1113,7 @@ async def summarize_messages_with_gemini(serialized_messages: str) -> Optional[s
 intents = discord.Intents.default()
 intents.message_content = True
 intents.members = True
+intents.guilds = True
 client = discord.Client(intents=intents, max_messages=10000)
 tree = app_commands.CommandTree(client)
 
@@ -1481,6 +1529,12 @@ async def ask_command(
                     }
 
     # Build context string as server instructions
+    # List guild emoji names for the model to optionally use
+    emoji_names: list[str] = await list_guild_emoji_names(interaction.guild)
+    emoji_usage_instructions = "You can use custom server emojis by writing :emoji_name: in your answer; they will be converted to real emojis."
+    emojis_context_line = "Guild Custom Emojis: " + (
+        ", ".join(f":{n}:" for n in emoji_names) if emoji_names else "None"
+    )
     # Format mentioned users context nicely
     if mentioned_users_context:
         if isinstance(mentioned_users_context[0], dict):
@@ -1589,6 +1643,8 @@ async def ask_command(
         f"Message: {message_context}\n"
         f"User:\n{user_context_str}\n"
         f"Channel: {channel_context}\n"
+        f"{emoji_usage_instructions}\n"
+        f"{emojis_context_line}\n"
         f"Recent Channel Messages (latest first, up to {CHANNEL_CONTEXT_LAST}):\n{channel_raw_context_str}\n"
         + (
             f"Channel Summary (last {CHANNEL_SUMMARY_DEPTH} messages, cached up to {CHANNEL_SUMMARY_TTL_MIN} min):\n{channel_summary_str}\n"
