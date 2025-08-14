@@ -21,6 +21,8 @@ from google.genai.types import Tool, UrlContext
 from better_profanity import profanity
 from PIL import Image
 
+from database import init_db, add_banned_user, remove_banned_user, is_banned
+
 # Initialize profanity filter
 profanity.load_censor_words()
 
@@ -323,6 +325,7 @@ def compute_deterministic_iq(
 
 
 load_dotenv()
+init_db()
 
 TOKEN: Optional[str] = os.getenv("DISCORD_BOT_TOKEN")
 GUILD_ID_ENV: Optional[str] = os.getenv("DISCORD_GUILD_ID")
@@ -2368,6 +2371,47 @@ async def debug_emojis_command(interaction: discord.Interaction) -> None:
         await interaction.followup.send(
             f"❌ **Error debugging emojis**\n\n"
             f"An error occurred: {str(e)[:200]}...",
+            ephemeral=True,
+        )
+
+
+@tree.command(
+    name="togglellmban",
+    description="[Owner Only] Ban a user from using the LLM",
+    guild=discord.Object(id=int(os.getenv("DEV_SERVER_ID", "0"))),
+)
+async def ban_llm_command(
+    interaction: discord.Interaction, user: discord.Member
+) -> None:
+    """Ban a user from using the LLM (owner only)."""
+    try:
+        owner_id = int(os.getenv("OWNER_ID", "0"))
+        if interaction.user.id != owner_id:
+            await interaction.response.send_message(
+                "❌ **Access Denied**\n\nOnly the bot owner can ban users from the LLM.",
+                ephemeral=True,
+            )
+            return
+
+        if is_banned(user.id):
+            remove_banned_user(user.id)
+            await interaction.response.send_message(
+                f"✅ **User Unbanned**\n\n"
+                f"{user.mention} has been unbanned from using the LLM.",
+                ephemeral=True,
+            )
+            return
+
+        # Add the user to the banned users list
+        add_banned_user(user.id)
+        await interaction.response.send_message(
+            f"✅ **User Banned**\n\n"
+            f"{user.mention} has been banned from using the LLM.",
+            ephemeral=True,
+        )
+    except Exception as e:
+        await interaction.response.send_message(
+            f"❌ **Error banning user**\n\n" f"An error occurred: {str(e)[:200]}...",
             ephemeral=True,
         )
 
