@@ -1954,6 +1954,12 @@ async def imagine_command(
             contents=prompt,
             config=types.GenerateContentConfig(
                 response_modalities=["TEXT", "IMAGE"],
+                safety_settings=[
+                    types.SafetySetting(
+                        category=types.HarmCategory.HARM_CATEGORY_IMAGE_SEXUALLY_EXPLICIT,
+                        threshold=types.HarmBlockThreshold.BLOCK_MEDIUM_AND_ABOVE,
+                    )
+                ],
             ),
         )
 
