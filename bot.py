@@ -1339,6 +1339,13 @@ async def ask_command(
         )
         return
 
+    if is_banned(interaction.user.id):
+        await interaction.response.send_message(
+            "You are banned from using the ask command.",
+            ephemeral=True,
+        )
+        return
+
     # Rate limiting check (owner bypass)
     owner_id = int(os.getenv("OWNER_ID", "0"))
     user_id = interaction.user.id
@@ -1869,6 +1876,12 @@ async def imagine_command(
     - Includes the original prompt in the response
     - No retry/fallback queue; handled directly in this command
     """
+    if is_banned(interaction.user.id):
+        await interaction.response.send_message(
+            "You are banned from using the imagine command.",
+            ephemeral=True,
+        )
+        return
     # Owner bypass and rate limiting
     owner_id = int(os.getenv("OWNER_ID", "0"))
     user_id = interaction.user.id
