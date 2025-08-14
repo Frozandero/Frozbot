@@ -1958,10 +1958,12 @@ async def imagine_command(
             )
         )
 
+    formatted_prompt = f"Generate an image from the following prompt: {prompt}"
+
     def call_gemini_image_api():
         return GEMINI_CLIENT.models.generate_content(  # type: ignore
             model=model_name,
-            contents=prompt,
+            contents=formatted_prompt,
             config=types.GenerateContentConfig(
                 response_modalities=["TEXT", "IMAGE"],
                 safety_settings=safety_settings,
