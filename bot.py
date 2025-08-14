@@ -24,6 +24,8 @@ from database import (
     clear_db,
     delete_memory,
     get_memories_by_user,
+    get_memories_for_users,
+    get_generic_memories,
     count_memories_by_user,
     init_db,
     add_banned_user,
@@ -1209,6 +1211,48 @@ async def get_channel_messages_for_summary(
     return collected, newest_id
 
 
+def fetch_channel_memories(
+    channel_id: int,
+    sender_username: str,
+    mentioned_usernames: list[str],
+    memory_limit: int = 5,
+) -> tuple[list[tuple[int, str, str]], dict[str, list[tuple[int, str, str]]]]:
+    """
+    Fetch memories for a channel context.
+
+    Returns:
+        - generic_memories: List of generic memories (username='*')
+        - user_memories: Dict mapping username -> list of memories for sender and mentioned users
+    """
+    try:
+        # Get generic memories for the channel
+        generic_memories = get_generic_memories(channel_id, memory_limit)
+
+        # Collect all usernames that need memories (sender + mentioned users)
+        all_usernames = [sender_username]
+        if mentioned_usernames:
+            all_usernames.extend(mentioned_usernames)
+
+        # Remove duplicates while preserving order
+        unique_usernames = []
+        seen = set()
+        for username in all_usernames:
+            if username not in seen:
+                unique_usernames.append(username)
+                seen.add(username)
+
+        # Fetch memories for all users in one query
+        user_memories = get_memories_for_users(
+            unique_usernames, channel_id, memory_limit
+        )
+
+        return generic_memories, user_memories
+
+    except Exception as e:
+        print(f"Error fetching channel memories: {e}")
+        return [], {}
+
+
 intents = discord.Intents.default()
 intents.message_content = True
 intents.members = True
@@ -1462,8 +1506,7 @@ async def ask_command(
         print(f"Failed to process image attachment: {e}")
 
     # Gathering context
-    # Gather server context
-    server_context = interaction.guild.name if interaction.guild else None
+    # Gather server context (will be built after memory fetching)
     # Gather mentioned users context - for slash commands, parse Discord mention syntax like <@1234567890>
     mentioned_users_context = []
     import re
@@ -1618,6 +1661,37 @@ async def ask_command(
         except ValueError:
             # Invalid user ID format
             mentioned_users_context.append(f"Invalid user ID: {user_id_str}")
+
+    # Fetch channel memories for context (early to be available for formatting)
+    sender_username = interaction.user.name if interaction.user else "Unknown"
+    mentioned_usernames = []
+
+    # Extract usernames from mentioned_users_context for memory fetching
+    for user_data in mentioned_users_context:
+        if isinstance(user_data, dict) and "username" in user_data:
+            mentioned_usernames.append(user_data["username"])
+
+    channel_id = interaction.channel.id if interaction.channel else 0
+    generic_memories, user_memories = fetch_channel_memories(
+        channel_id, sender_username, mentioned_usernames, memory_limit=5
+    )
+
+    # Build server context with generic memories
+    if interaction.guild:
+        server_context_parts = [f"Name: {interaction.guild.name}"]
+
+        # Add generic memories to server context
+        if generic_memories:
+            server_context_parts.append("Server Memories:")
+            for i, (memory_id, username, memory) in enumerate(generic_memories, 1):
+                server_context_parts.append(f"  {i}. {memory}")
+        else:
+            server_context_parts.append("Server Memories: None")
+
+        server_context = "\n".join(server_context_parts)
+    else:
+        server_context = None
+
     # Gather date context with current timestamp
     date_context = datetime.datetime.now().strftime("%Y-%m-%d %H:%M")
     # Gather message context - for slash commands, this is the processed question with mentions replaced
@@ -1807,6 +1881,21 @@ async def ask_command(
                     else:
                         user_info_parts.append("  Recent Messages: None")
 
+                    # Add memories for this user if available
+                    mentioned_username = user_data.get("username", "")
+                    if (
+                        mentioned_username
+                        and mentioned_username in user_memories
+                        and user_memories[mentioned_username]
+                    ):
+                        user_info_parts.append("  Memories:")
+                        for i, (memory_id, username, memory) in enumerate(
+                            user_memories[mentioned_username], 1
+                        ):
+                            user_info_parts.append(f"    {i}. {memory}")
+                    else:
+                        user_info_parts.append("  Memories: None")
+
                     users_info.append("\n".join(user_info_parts))
                 else:
                     users_info.append(str(user_data))
@@ -1851,6 +1940,21 @@ async def ask_command(
                     user_info_parts.append(msg_info)
             else:
                 user_info_parts.append("Recent Messages: None")
+
+            # Add memories for this user if available
+            user_username = user_context.get("username", "")
+            if (
+                user_username
+                and user_username in user_memories
+                and user_memories[user_username]
+            ):
+                user_info_parts.append("Memories:")
+                for i, (memory_id, username, memory) in enumerate(
+                    user_memories[user_username], 1
+                ):
+                    user_info_parts.append(f"  {i}. {memory}")
+            else:
+                user_info_parts.append("Memories: None")
 
             user_context_str = "\n".join(user_info_parts)
         else:

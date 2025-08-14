@@ -150,3 +150,64 @@ def delete_memory(id: int, channel_id: int):
     c = conn.cursor()
     c.execute("DELETE FROM memories WHERE id = ?", (id,))
     conn.commit()
+    conn.close()
+
+
+def get_memories_for_users(
+    usernames: list[str], channel_id: int, limit: int = 10
+) -> dict[str, list[tuple[int, str, str]]]:
+    """
+    Get memories for multiple users in a single query.
+    Returns a dict mapping username -> list of memories.
+    """
+    conn = sqlite3.connect("database.db")
+    c = conn.cursor()
+
+    if not usernames:
+        return {}
+
+    # Create placeholders for the IN clause
+    placeholders = ",".join("?" for _ in usernames)
+
+    if limit == -1:
+        query = f"""
+            SELECT id, username, memory FROM memories 
+            WHERE username IN ({placeholders}) AND channel_id = ? 
+            ORDER BY created_at DESC
+        """
+        params = usernames + [channel_id]
+    else:
+        # For limited results, we need to use a more complex query to limit per user
+        # This approach gets all memories for the users and we'll limit in Python
+        query = f"""
+            SELECT id, username, memory FROM memories 
+            WHERE username IN ({placeholders}) AND channel_id = ? 
+            ORDER BY username, created_at DESC
+        """
+        params = usernames + [channel_id]
+
+    c.execute(query, params)
+    results = c.fetchall()
+    conn.close()
+
+    # Group by username and apply limit if needed
+    memories_by_user = {}
+    for username in usernames:
+        memories_by_user[username] = []
+
+    for memory_id, username, memory in results:
+        if username in memories_by_user and (
+            limit == -1 or len(memories_by_user[username]) < limit
+        ):
+            memories_by_user[username].append((memory_id, username, memory))
+
+    return memories_by_user
+
+
+def get_generic_memories(
+    channel_id: int, limit: int = 10
+) -> list[tuple[int, str, str]]:
+    """
+    Get generic memories (username='*') for a channel.
+    """
+    return get_memories_by_user("*", channel_id, limit)
