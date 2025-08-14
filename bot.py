@@ -1953,7 +1953,7 @@ async def imagine_command(
     if nsfw_channel:
         safety_settings.append(
             types.SafetySetting(
-                category=types.HarmCategory.HARM_CATEGORY_IMAGE_SEXUALLY_EXPLICIT,
+                category=types.HarmCategory.HARM_CATEGORY_SEXUALLY_EXPLICIT,
                 threshold=types.HarmBlockThreshold.BLOCK_MEDIUM_AND_ABOVE,
             )
         )
