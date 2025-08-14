@@ -10,18 +10,27 @@ import io
 from typing import Optional, Dict, Any, cast
 from dataclasses import dataclass
 from enum import Enum
+from google.genai import errors, types
 
 import discord
 from discord import app_commands
 from dotenv import load_dotenv
-from google import genai
-from google.genai import types
-from google.genai import errors
-from google.genai.types import Tool, UrlContext
+
 from better_profanity import profanity
 from PIL import Image
 
-from database import init_db, add_banned_user, remove_banned_user, is_banned
+from database import (
+    add_memory,
+    clear_db,
+    delete_memory,
+    get_memories_by_user,
+    count_memories_by_user,
+    init_db,
+    add_banned_user,
+    remove_banned_user,
+    is_banned,
+)
+from llm import GEMINI_CLIENT, summarize_messages_with_gemini, try_gemini_models
 
 # Initialize profanity filter
 profanity.load_censor_words()
@@ -30,6 +39,113 @@ profanity.load_censor_words()
 def filter_profanity(text: str) -> str:
     """Filter profanity from text, replacing it with asterisks."""
     return profanity.censor(text, "■")
+
+
+class MemoryPaginationView(discord.ui.View):
+    def __init__(
+        self, username: str, channel_id: int, page: int = 0, page_size: int = 10
+    ):
+        super().__init__(timeout=300)  # 5 minute timeout
+        self.username = username
+        self.page = page
+        self.page_size = page_size
+        self.channel_id = channel_id
+        self.total_memories = count_memories_by_user(username, channel_id)
+        self.total_pages = max(1, (self.total_memories + page_size - 1) // page_size)
+
+        # Update button states
+        self.update_buttons()
+
+    def update_buttons(self):
+        # Clear existing buttons
+        self.clear_items()
+
+        # Add Previous button
+        prev_button = discord.ui.Button(
+            label="◀ Previous",
+            style=discord.ButtonStyle.secondary,
+            custom_id=f"memory_prev_{self.username}_{self.page}",
+            disabled=(self.page <= 0),
+        )
+        prev_button.callback = self.previous_page
+        self.add_item(prev_button)
+
+        # Add page info button (non-functional, just shows page info)
+        page_info = discord.ui.Button(
+            label=f"Page {self.page + 1}/{self.total_pages}",
+            style=discord.ButtonStyle.primary,
+            disabled=True,
+        )
+        self.add_item(page_info)
+
+        # Add Next button
+        next_button = discord.ui.Button(
+            label="Next ▶",
+            style=discord.ButtonStyle.secondary,
+            custom_id=f"memory_next_{self.username}_{self.page}",
+            disabled=(self.page >= self.total_pages - 1),
+        )
+        next_button.callback = self.next_page
+        self.add_item(next_button)
+
+    def get_current_memories(self) -> list[tuple[int, str, str]]:
+        offset = self.page * self.page_size
+        return get_memories_by_user(
+            self.username, self.channel_id, self.page_size, offset
+        )
+
+    def format_memories_message(self) -> str:
+        memories = self.get_current_memories()
+        if not memories:
+            return f"No memories found for {self.username}."
+
+        # Limit memory length for display to prevent overly long messages
+        formatted_memories = []
+        for memory in memories:
+            memory_num = memory[0]
+            # Truncate very long memories for readability
+            display_memory = (
+                memory[2] if len(memory[2]) <= 200 else memory[2][:197] + "..."
+            )
+            formatted_memories.append(f"{memory_num}. {memory[1]}: {display_memory}")
+
+        memory_text = "\n".join(formatted_memories)
+
+        return f"**Memories for {self.username}** ({self.total_memories} total):\n\n{memory_text}"
+
+    async def previous_page(self, interaction: discord.Interaction):
+        try:
+            if self.page > 0:
+                self.page -= 1
+                self.update_buttons()
+                await interaction.response.edit_message(
+                    content=self.format_memories_message(), view=self
+                )
+            else:
+                await interaction.response.defer()
+        except Exception as e:
+            print(f"Error in previous_page: {e}")
+            await interaction.response.defer()
+
+    async def next_page(self, interaction: discord.Interaction):
+        try:
+            if self.page < self.total_pages - 1:
+                self.page += 1
+                self.update_buttons()
+                await interaction.response.edit_message(
+                    content=self.format_memories_message(), view=self
+                )
+            else:
+                await interaction.response.defer()
+        except Exception as e:
+            print(f"Error in next_page: {e}")
+            await interaction.response.defer()
+
+    async def on_timeout(self):
+        # Disable all buttons when the view times out
+        for item in self.children:
+            if isinstance(item, discord.ui.Button):
+                item.disabled = True
 
 
 async def debug_guild_emoji_state(guild: Optional[discord.Guild]) -> str:
@@ -342,8 +458,6 @@ IS_DEV_SERVER_COMMAND: Optional[discord.Object] = (
     else None
 )
 
-URL_CONTEXT_TOOL = Tool(url_context=UrlContext())  # type: ignore
-GEMINI_CLIENT = genai.Client() if os.getenv("GEMINI_API_KEY") else None
 
 # Rate limiting for ask command: user_id -> last_used_timestamp
 ASK_COMMAND_COOLDOWNS: Dict[int, datetime.datetime] = {}
@@ -1017,173 +1131,6 @@ async def process_retry_request(request: QueuedRequest) -> None:
         print(f"❌ Error in retry request {request.request_id}: {e}")
 
 
-async def try_gemini_models(
-    question: str, context_string: str, media_parts: Optional[list]
-) -> Optional[str]:
-    """
-    Try to get a response from Gemini using multiple models with fallback.
-    Returns the response text if successful, None if all models fail with quota errors.
-    """
-    if not GEMINI_CLIENT:
-        return None
-
-    # Define models to try in order of preference
-    models_to_try = [
-        "gemini-2.5-pro",  # Best quality, highest quota
-        "gemini-2.5-flash",  # Good quality, medium quota
-        "gemini-2.5-flash-lite",  # Basic quality, highest quota
-        "gemini-2.0-flash",  # Good quality, medium quota
-        "gemini-2.0-flash-lite",  # Basic quality, highest quota
-    ]
-
-    tools_for_supporting_models = [URL_CONTEXT_TOOL]
-    thinking_budgets = [512, 256, 0, 0, 0]
-    tools = [
-        tools_for_supporting_models,
-        tools_for_supporting_models,
-        tools_for_supporting_models,
-        tools_for_supporting_models,
-        [],
-    ]
-
-    for i, (model_name, thinking_budget) in enumerate(
-        zip(models_to_try, thinking_budgets)
-    ):
-        try:
-            print(f"🔄 Trying model: {model_name} (attempt {i+1}/{len(models_to_try)})")
-
-            # Run the Gemini API call in a thread to avoid blocking the event loop
-            def call_gemini_api():
-                if not GEMINI_CLIENT:
-                    raise RuntimeError("Gemini client not initialized")
-                request_contents = [*media_parts, question] if media_parts else question
-                return GEMINI_CLIENT.models.generate_content(
-                    model=model_name,
-                    config=types.GenerateContentConfig(
-                        system_instruction=context_string,  # type: ignore
-                        thinking_config=types.ThinkingConfig(
-                            thinking_budget=thinking_budget
-                        ),
-                        tools=tools[i],
-                    ),
-                    contents=request_contents,
-                )
-
-            # Use ThreadPoolExecutor to run the blocking API call
-            loop = asyncio.get_event_loop()
-            with concurrent.futures.ThreadPoolExecutor() as executor:
-                response = await asyncio.wait_for(
-                    loop.run_in_executor(executor, call_gemini_api),
-                    timeout=30.0,  # 30 second timeout
-                )
-
-            print(f"✅ Success with model: {model_name}")
-
-            # Check if response has text attribute
-            if hasattr(response, "text") and response.text:
-                return response.text
-            else:
-                print(
-                    f"⚠️ Warning: {model_name} returned response without text attribute"
-                )
-                print(f"Response object type: {type(response)}")
-                if hasattr(response, "text"):
-                    print(f"Response.text value: {response.text}")
-                continue
-
-        except asyncio.TimeoutError:
-            print(f"⏰ Timeout for {model_name}, trying next model...")
-            continue
-        except errors.APIError as e:
-            if e.code == 429:
-                print(f"⏰ Quota exceeded for {model_name}, trying next model...")
-                continue
-            elif e.code in [
-                500,
-                502,
-                503,
-                504,
-            ]:  # Server errors that might be temporary
-                print(f"🔄 Server error ({e.code}) for {model_name}, retrying...")
-                # For server errors, try the same model again once
-                try:
-                    print(f"🔄 Retrying {model_name} after server error...")
-                    # Add a small delay before retry to avoid overwhelming the service
-                    await asyncio.sleep(1)
-
-                    # Define the retry function inline to avoid scope issues
-                    def retry_gemini_api():
-                        if not GEMINI_CLIENT:
-                            raise RuntimeError("Gemini client not initialized")
-                        request_contents_retry = (
-                            [*media_parts, question] if media_parts else question
-                        )
-                        return GEMINI_CLIENT.models.generate_content(
-                            model=model_name,
-                            config=types.GenerateContentConfig(
-                                system_instruction=context_string,  # type: ignore
-                                thinking_config=types.ThinkingConfig(
-                                    thinking_budget=thinking_budget
-                                ),
-                            ),
-                            contents=request_contents_retry,
-                        )
-
-                    loop = asyncio.get_event_loop()
-                    with concurrent.futures.ThreadPoolExecutor() as executor:
-                        response = await asyncio.wait_for(
-                            loop.run_in_executor(executor, retry_gemini_api),
-                            timeout=30.0,
-                        )
-                    print(f"✅ Success with {model_name} on retry")
-
-                    # Check if response has text attribute
-                    if hasattr(response, "text") and response.text:
-                        return response.text
-                    else:
-                        print(
-                            f"⚠️ Warning: {model_name} retry returned response without text attribute"
-                        )
-                        print(f"Response object type: {type(response)}")
-                        print(f"Response object attributes: {dir(response)}")
-                        if hasattr(response, "text"):
-                            print(f"Response.text value: {response.text}")
-                        continue
-                except Exception as retry_error:
-                    print(
-                        f"❌ Retry failed for {model_name}: {str(retry_error)[:100]}..."
-                    )
-                    continue
-            else:
-                # Non-quota, non-server error, log and try next model
-                error_msg = e.message if e.message else str(e)
-                print(
-                    f"❌ Non-quota error with {model_name}: {error_msg[:100]}... (code: {e.code})"
-                )
-                continue
-        except Exception as e:
-            print(f"❌ Unexpected error with {model_name}: {str(e)[:100]}...")
-            # Log the full error for debugging
-            import traceback
-
-            print(f"Full error details for {model_name}:")
-            traceback.print_exc()
-            continue
-
-    # All models failed
-    print("🚫 All models failed")
-    print(f"Failed to get response for question: {question[:100]}...")
-
-    # Log additional debugging information
-    print("🔍 Debugging info:")
-    print(f"  - Total models attempted: {len(models_to_try)}")
-    print(f"  - GEMINI_CLIENT initialized: {GEMINI_CLIENT is not None}")
-    if GEMINI_CLIENT:
-        print(f"  - GEMINI_CLIENT type: {type(GEMINI_CLIENT)}")
-
-    return None
-
-
 async def get_recent_channel_messages(
     channel: Any,
     limit: int,
@@ -1262,26 +1209,6 @@ async def get_channel_messages_for_summary(
     return collected, newest_id
 
 
-async def summarize_messages_with_gemini(serialized_messages: str) -> Optional[str]:
-    """Summarize a set of messages into 1–2 sentences using the existing Gemini client with model fallback."""
-    if not GEMINI_CLIENT:
-        return None
-    context_instr = (
-        "You are summarizing a Discord channel's recent conversation for an assistant. "
-        "Compress only. Do not speculate. Keep it to 1–2 sentences, focusing on the main topics, decisions, or questions. "
-        "Include notable entities or links if critical."
-    )
-    prompt = (
-        "Summarize the following messages in at most 2 sentences."
-        "\n\nMessages:\n" + serialized_messages
-    )
-    try:
-        return await try_gemini_models(prompt, context_instr, None)
-    except Exception as e:
-        print(f"Error summarizing messages: {e}")
-        return None
-
-
 intents = discord.Intents.default()
 intents.message_content = True
 intents.members = True
@@ -1323,6 +1250,115 @@ async def iq_command(
                 f"Interaction not found when sending IQ response for user {interaction.user.id}"
             )
             return
+
+
+@tree.command(
+    name="setmemory",
+    description="Set a memory for the bot.",
+    guild=None,
+)
+async def set_memory_command(
+    interaction: discord.Interaction,
+    memory: str,
+    user: Optional[discord.Member] = None,
+) -> None:
+    # only owner can use this command
+    if interaction.user.id != int(os.getenv("OWNER_ID", "0")):
+        await interaction.response.send_message(
+            "Only owner can set memories at the moment.",
+            ephemeral=True,
+        )
+        return
+
+    try:
+        username = user.name if user else "*"
+
+        add_memory(
+            username, memory, interaction.channel.id if interaction.channel else 0
+        )
+
+        await interaction.response.send_message(
+            f"Memory set for {username}.",
+            ephemeral=True,
+        )
+    except Exception as e:
+        print(f"Error setting memory: {e}")
+        await interaction.response.send_message(
+            f"Error setting memory: {e}",
+            ephemeral=True,
+        )
+
+
+@tree.command(
+    name="getmemory",
+    description="Get memories of the bot.",
+    guild=None,
+)
+async def get_memory_command(
+    interaction: discord.Interaction,
+    user: Optional[discord.Member] = None,
+    limit: int = 10,
+) -> None:
+    username = user.name if user else "*"
+    # Check if pagination is needed
+    try:
+        total_memories = count_memories_by_user(
+            username, interaction.channel.id if interaction.channel else 0
+        )
+        if total_memories == 0:
+            await interaction.response.send_message(
+                f"No memories found for {username}.",
+                ephemeral=True,
+            )
+            return
+
+        # Use pagination for normal cases
+        page_size = min(limit, 10)  # Cap at 10 per page for readability
+        view = MemoryPaginationView(
+            username,
+            page=0,
+            page_size=page_size,
+            channel_id=interaction.channel.id if interaction.channel else 0,
+        )
+
+        await interaction.response.send_message(
+            content=view.format_memories_message(), view=view
+        )
+    except Exception as e:
+        print(f"Error getting memory: {e}")
+        await interaction.response.send_message(
+            f"Error getting memory: {e}",
+            ephemeral=True,
+        )
+
+
+@tree.command(
+    name="deletememory",
+    description="Delete a memory for the bot.",
+    guild=None,
+)
+async def delete_memory_command(
+    interaction: discord.Interaction,
+    memory_id: int,
+) -> None:
+    if interaction.user.id != int(os.getenv("OWNER_ID", "0")):
+        await interaction.response.send_message(
+            "Only owner can delete memories at the moment.",
+            ephemeral=True,
+        )
+        return
+    try:
+        delete_memory(memory_id, interaction.channel.id if interaction.channel else 0)
+        await interaction.response.send_message(
+            f"Memory {memory_id} deleted.",
+            ephemeral=True,
+        )
+    except Exception as e:
+        print(f"Error deleting memory: {e}")
+        await interaction.response.send_message(
+            f"Error deleting memory: {e}",
+            ephemeral=True,
+        )
 
 
 @tree.command(name="ask", description="Ask the bot a question.", guild=None)
