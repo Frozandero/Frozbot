@@ -1948,18 +1948,23 @@ async def imagine_command(
     model_name = "gemini-2.0-flash-preview-image-generation"
     print(f"🖼️ Generating image with model: {model_name}")
 
+    nsfw_channel = interaction.channel.is_nsfw() if interaction.channel else False  # type: ignore
+    safety_settings = []
+    if nsfw_channel:
+        safety_settings.append(
+            types.SafetySetting(
+                category=types.HarmCategory.HARM_CATEGORY_IMAGE_SEXUALLY_EXPLICIT,
+                threshold=types.HarmBlockThreshold.BLOCK_MEDIUM_AND_ABOVE,
+            )
+        )
+
     def call_gemini_image_api():
         return GEMINI_CLIENT.models.generate_content(  # type: ignore
             model=model_name,
             contents=prompt,
             config=types.GenerateContentConfig(
                 response_modalities=["TEXT", "IMAGE"],
-                safety_settings=[
-                    types.SafetySetting(
-                        category=types.HarmCategory.HARM_CATEGORY_IMAGE_SEXUALLY_EXPLICIT,
-                        threshold=types.HarmBlockThreshold.BLOCK_MEDIUM_AND_ABOVE,
-                    )
-                ],
+                safety_settings=safety_settings,
             ),
         )
 
