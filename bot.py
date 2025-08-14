@@ -2378,7 +2378,7 @@ async def debug_emojis_command(interaction: discord.Interaction) -> None:
 @tree.command(
     name="togglellmban",
     description="[Owner Only] Ban a user from using the LLM",
-    guild=discord.Object(id=int(os.getenv("DEV_SERVER_ID", "0"))),
+    guild=None,
 )
 async def ban_llm_command(
     interaction: discord.Interaction, user: discord.Member
