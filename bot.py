@@ -1950,7 +1950,7 @@ async def imagine_command(
 
     nsfw_channel = interaction.channel.is_nsfw() if interaction.channel else False  # type: ignore
     safety_settings = []
-    if nsfw_channel:
+    if not nsfw_channel:
         safety_settings.append(
             types.SafetySetting(
                 category=types.HarmCategory.HARM_CATEGORY_SEXUALLY_EXPLICIT,
