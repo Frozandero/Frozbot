@@ -32,7 +32,7 @@ from database import (
     remove_banned_user,
     is_banned,
 )
-from llm import GEMINI_CLIENT, summarize_messages_with_gemini, try_gemini_models
+from llm import get_gemini_client, summarize_messages_with_gemini, try_gemini_models
 
 # Initialize profanity filter
 profanity.load_censor_words()
@@ -1473,7 +1473,8 @@ async def ask_command(
         for user_id in users_to_remove:
             del RECENT_QUESTIONS[user_id]
 
-    if not GEMINI_CLIENT:
+    gemini_client = get_gemini_client()
+    if not gemini_client:
         try:
             await interaction.response.send_message(
                 "The bot is not configured to use Gemini AI. Please contact the server owner.",
@@ -2067,7 +2068,8 @@ async def imagine_command(
         return
 
     # Ensure Gemini client is configured
-    if not GEMINI_CLIENT:
+    gemini_client = get_gemini_client()
+    if not gemini_client:
         print("❌ /imagine attempted but GEMINI_CLIENT is not configured")
         try:
             await interaction.response.send_message(
@@ -2101,7 +2103,8 @@ async def imagine_command(
     formatted_prompt = f"Generate an image from the following prompt: {prompt}"
 
     def call_gemini_image_api():
-        return GEMINI_CLIENT.models.generate_content(  # type: ignore
+        gemini_client = get_gemini_client()
+        return gemini_client.models.generate_content(  # type: ignore
             model=model_name,
             contents=formatted_prompt,
             config=types.GenerateContentConfig(

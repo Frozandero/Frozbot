@@ -11,6 +11,13 @@ URL_CONTEXT_TOOL = Tool(url_context=UrlContext())  # type: ignore
 GEMINI_CLIENT = genai.Client() if os.getenv("GEMINI_API_KEY") else None
 
 
+def get_gemini_client():
+    global GEMINI_CLIENT
+    if not GEMINI_CLIENT:
+        GEMINI_CLIENT = genai.Client()
+    return GEMINI_CLIENT
+
+
 async def try_gemini_models(
     question: str, context_string: str, media_parts: Optional[list]
 ) -> Optional[str]:
