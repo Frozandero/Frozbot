@@ -355,6 +355,7 @@ IMAGINE_COMMAND_COOLDOWN_MINUTES = int(
 )  # 15 minutes cooldown
 # Global toggle for image generation
 IMAGINE_ENABLE: bool = os.getenv("IMAGINE_ENABLE", "true").lower() == "true"
+ASK_ENABLE: bool = os.getenv("ASK_ENABLE", "true").lower() == "true"
 
 # Store recent questions for retry functionality: user_id -> list of recent questions
 RECENT_QUESTIONS: Dict[int, list] = {}
@@ -1327,6 +1328,14 @@ async def ask_command(
     question: str,
     image: Optional[discord.Attachment] = None,
 ) -> None:
+
+    if not ASK_ENABLE:
+        await interaction.response.send_message(
+            "The ask command is disabled.",
+            ephemeral=True,
+        )
+        return
+
     # Rate limiting check (owner bypass)
     owner_id = int(os.getenv("OWNER_ID", "0"))
     user_id = interaction.user.id
@@ -2359,6 +2368,47 @@ async def debug_emojis_command(interaction: discord.Interaction) -> None:
         await interaction.followup.send(
             f"❌ **Error debugging emojis**\n\n"
             f"An error occurred: {str(e)[:200]}...",
+            ephemeral=True,
+        )
+
+
+@tree.command(
+    name="setask",
+    description="[Owner Only] Enable/disable ask command (true/false or omit to view)",
+    guild=discord.Object(id=int(os.getenv("DEV_SERVER_ID", "0"))),
+)
+async def set_ask_command_command(
+    interaction: discord.Interaction, enabled: Optional[bool] = None
+) -> None:
+    """View or update the ask command (owner only)."""
+    try:
+        owner_id = int(os.getenv("OWNER_ID", "0"))
+        if interaction.user.id != owner_id:
+            await interaction.response.send_message(
+                "❌ **Access Denied**\n\nOnly the bot owner can change this setting.",
+                ephemeral=True,
+            )
+            return
+
+        global ASK_ENABLE
+
+        if enabled is None:
+            await interaction.response.send_message(
+                f"💬 **Ask Command**\n\nCurrent: {ASK_ENABLE}",
+                ephemeral=True,
+            )
+            return
+
+        old_value = ASK_ENABLE
+        ASK_ENABLE = bool(enabled)
+        await interaction.response.send_message(
+            f"✅ **Ask Command Updated**\n\nOld: {old_value}\nNew: {ASK_ENABLE}",
+            ephemeral=True,
+        )
+
+    except Exception as e:
+        await interaction.response.send_message(
+            f"❌ **Error updating setting**\n\nAn error occurred: {str(e)[:200]}...",
             ephemeral=True,
         )
 
