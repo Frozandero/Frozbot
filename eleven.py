@@ -39,7 +39,9 @@ def generate_tts(text: str) -> bytes:
             output_format="mp3_22050_32",
         )
 
-        return mp3_bytes_to_ogg(b"".join(tts_bytes))
+        bstring = b"".join(tts_bytes)
+
+        return mp3_bytes_to_ogg(bstring)
 
     except Exception as e:
         print(f"Error generating TTS: {e}")
@@ -65,9 +67,10 @@ def mp3_bytes_to_ogg(mp3_bytes: bytes) -> bytes:
     """
     Convert MP3 bytes to OGG Vorbis bytes using ffmpeg (no pydub).
     """
+    ffmpeg_bin = "ffmpeg.exe" if os.name == "nt" else "ffmpeg"
     process = subprocess.Popen(
         [
-            "ffmpeg",
+            ffmpeg_bin,
             "-i",
             "pipe:0",
             "-ar",
@@ -76,11 +79,28 @@ def mp3_bytes_to_ogg(mp3_bytes: bytes) -> bytes:
             "libopus",
             "-b:a",
             "32k",
+            "-f",
+            "ogg",  # explicitly specify output format
             "pipe:1",
         ],
         stdin=subprocess.PIPE,
         stdout=subprocess.PIPE,
-        stderr=subprocess.DEVNULL,
+        stderr=subprocess.PIPE,  # Capture stderr for debugging
     )
-    out_bytes, _ = process.communicate(mp3_bytes)
+    out_bytes, err_bytes = process.communicate(mp3_bytes)
+
+    # Only log actual errors (non-zero return code)
+    if process.returncode != 0:
+        print(
+            f"FFmpeg error (return code {process.returncode}): {err_bytes.decode('utf-8', errors='ignore')}"
+        )
+        return b""
+
+    # FFmpeg writes informational output to stderr, which is normal
+    # Only print stderr in debug mode or if something seems wrong
+    if not out_bytes and err_bytes:
+        print(
+            f"FFmpeg stderr (no output generated): {err_bytes.decode('utf-8', errors='ignore')}"
+        )
+
     return out_bytes
