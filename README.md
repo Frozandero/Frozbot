@@ -67,7 +67,7 @@ python bot.py
 #### User Commands
 - `/iq [user]` - Get the IQ of a user (or yourself if no user specified)
 - `/ask <question>` - Ask the bot a question using AI
-- `/imagine <prompt>` - Generate an image from a text prompt using Gemini image generation
+- `/imagine <prompt> [image]` - Generate an image from a text prompt using Gemini image generation. Optionally include an image for reference/modification
 - `/queue` - Check the current request queue status
 
 #### Owner Commands

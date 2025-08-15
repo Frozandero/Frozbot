@@ -2006,16 +2006,19 @@ async def ask_command(
 
 @tree.command(
     name="imagine",
-    description="Generate an image from a prompt using Gemini.",
+    description="Generate an image from a prompt using Gemini. Optionally include an image for reference.",
     guild=None,
 )
 async def imagine_command(
     interaction: discord.Interaction,
     prompt: str,
+    image: Optional[discord.Attachment] = None,
 ) -> None:
     """Create an image from text using Gemini image generation and send it as an attachment.
 
     - Uses model: gemini-2.0-flash-preview-image-generation
+    - Supports both text-to-image and image-to-image generation
+    - If an image is provided, it will be used as reference for the generation
     - Includes the original prompt in the response
     - No retry/fallback queue; handled directly in this command
     """
@@ -2031,7 +2034,8 @@ async def imagine_command(
 
     # Log request start
     try:
-        print(f"🎨 /imagine request from user {user_id}: {prompt[:60]}...")
+        image_info = " (with image input)" if image else ""
+        print(f"🎨 /imagine request from user {user_id}{image_info}: {prompt[:60]}...")
     except Exception:
         pass
 
@@ -2088,6 +2092,20 @@ async def imagine_command(
     except discord.errors.NotFound:
         return
 
+    # Process optional image input
+    image_parts = []
+    try:
+        if image and getattr(image, "content_type", "").startswith("image/"):
+            image_bytes = await image.read()
+            pil_img = Image.open(io.BytesIO(image_bytes))
+            image_parts = [pil_img]
+            print(
+                f"🖼️ Image input detected: {image.content_type}, size: {len(image_bytes)} bytes"
+            )
+    except Exception as e:
+        # Log image processing error but continue without image
+        print(f"Failed to process image attachment: {e}")
+
     # Call Gemini image generation in a worker thread to avoid blocking the event loop
     model_name = "gemini-2.0-flash-preview-image-generation"
     print(f"🖼️ Generating image with model: {model_name}")
@@ -2102,13 +2120,23 @@ async def imagine_command(
             )
         )
 
-    formatted_prompt = f"Generate an image from the following prompt: {prompt}"
+    # Prepare content based on whether we have an input image
+    if image_parts:
+        # Image-to-image generation: combine image and text prompt
+        formatted_prompt = f"Based on the provided image, {prompt}"
+        contents = [*image_parts, formatted_prompt]
+        print(f"🖼️ Using image-to-image generation")
+    else:
+        # Text-to-image generation: just the text prompt
+        formatted_prompt = f"Generate an image from the following prompt: {prompt}"
+        contents = formatted_prompt
+        print(f"🖼️ Using text-to-image generation")
 
     def call_gemini_image_api():
         gemini_client = get_gemini_client()
         return gemini_client.models.generate_content(  # type: ignore
             model=model_name,
-            contents=formatted_prompt,
+            contents=contents,
             config=types.GenerateContentConfig(
                 response_modalities=["TEXT", "IMAGE"],
                 safety_settings=safety_settings,
@@ -2175,18 +2203,34 @@ async def imagine_command(
                 print(f"⚠️ Error during emoji replacement in imagine command: {e}")
                 pass
 
-        header = f"**Prompt:** {filtered_prompt}\n\n"
+        # Build header with input image information if provided
+        image_source_info = " (with image input)" if image_parts else ""
+        header = f"**Prompt:** {filtered_prompt}{image_source_info}\n\n"
         if display_text:
             content = header + f"**Notes:** {display_text}"
         else:
             content = header + "Generating image..."
 
         if image_buffer is not None:
-            file = discord.File(image_buffer, filename="imagine.png")
+            files_to_send = [discord.File(image_buffer, filename="imagine.png")]
+
+            # Include the input image as reference if one was provided
+            if image_parts:
+                try:
+                    # Convert PIL image back to bytes for Discord
+                    input_img_buf = io.BytesIO()
+                    image_parts[0].convert("RGB").save(input_img_buf, format="PNG")
+                    input_img_buf.seek(0)
+                    files_to_send.insert(
+                        0, discord.File(input_img_buf, filename="input_reference.png")
+                    )
+                except Exception as e:
+                    print(f"⚠️ Failed to include input image as reference: {e}")
+
             # Ensure content fits Discord's 2000 char limit
             if len(content) > 2000:
                 content = content[:1997] + "..."
-            await interaction.followup.send(content=content, file=file)
+            await interaction.followup.send(content=content, files=files_to_send)
             # On success, record cooldown (non-owner only)
             if user_id != owner_id:
                 IMAGINE_COMMAND_COOLDOWNS[user_id] = datetime.datetime.now()
