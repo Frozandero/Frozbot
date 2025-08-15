@@ -40,7 +40,7 @@ profanity.load_censor_words()
 
 def filter_profanity(text: str) -> str:
     """Filter profanity from text, replacing it with asterisks."""
-    return profanity.censor(text, "■")
+    return profanity.censor(text, "■") if CENSOR_MESSAGES else text
 
 
 class MemoryPaginationView(discord.ui.View):
@@ -460,6 +460,8 @@ IS_DEV_SERVER_COMMAND: Optional[discord.Object] = (
     else None
 )
 
+# Censor toggle
+CENSOR_MESSAGES: bool = os.getenv("CENSOR_MESSAGES", "false").lower() == "true"
 
 # Rate limiting for ask command: user_id -> last_used_timestamp
 ASK_COMMAND_COOLDOWNS: Dict[int, datetime.datetime] = {}
