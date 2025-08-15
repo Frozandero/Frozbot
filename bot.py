@@ -7,7 +7,7 @@ import asyncio
 import concurrent.futures
 import uuid
 import io
-from typing import Optional, Dict, Any, cast
+from typing import Optional, Dict, Any
 from dataclasses import dataclass
 from enum import Enum
 from google.genai import errors, types
@@ -32,6 +32,7 @@ from database import (
     remove_banned_user,
     is_banned,
 )
+from eleven import generate_tts, get_eleven_client
 from llm import get_gemini_client, summarize_messages_with_gemini, try_gemini_models
 
 # Initialize profanity filter
@@ -607,6 +608,7 @@ class QueuedRequest:
     timestamp: datetime.datetime
     priority: int = 0  # Higher number = higher priority
     media_parts: Optional[list] = None
+    tts: bool = False
 
 
 # Global request queue
@@ -650,13 +652,15 @@ def cleanup_imagine_expired_cooldowns() -> None:
         del IMAGINE_COMMAND_COOLDOWNS[user_id]
 
 
-def store_user_question(user_id: int, question: str) -> None:
+def store_user_question(
+    user_id: int, question: str, tts: bool, image: Optional[discord.Attachment] = None
+) -> None:
     """Store a user's question for potential retry functionality."""
     if user_id not in RECENT_QUESTIONS:
         RECENT_QUESTIONS[user_id] = []
 
     # Add new question to the beginning
-    RECENT_QUESTIONS[user_id].insert(0, question)
+    RECENT_QUESTIONS[user_id].insert(0, (question, tts, image))
 
     # Keep only the most recent questions
     if len(RECENT_QUESTIONS[user_id]) > MAX_STORED_QUESTIONS:
@@ -721,6 +725,7 @@ async def add_request_to_queue(
     user_id: int,
     priority: int = 0,
     media_parts: Optional[list] = None,
+    tts: bool = False,
 ) -> str:
     """Add a request to the queue and start the processor if needed."""
     request_id = (
@@ -737,6 +742,7 @@ async def add_request_to_queue(
         timestamp=datetime.datetime.now(),
         priority=priority,
         media_parts=media_parts,
+        tts=tts,
     )
 
     await REQUEST_QUEUE.put(request)
@@ -803,22 +809,41 @@ async def process_ask_request(request: QueuedRequest) -> None:
             except Exception:
                 files_param = None
 
-            if len(formatted_response) <= 2000:
-                if files_param:
-                    await request.interaction.followup.send(
-                        content=formatted_response, files=files_param
-                    )
-                else:
-                    await request.interaction.followup.send(content=formatted_response)
+            # Generate TTS if requested
+            if request.tts:
+                try:
+                    print(f"🎵 Generating TTS for response...")
+                    # Generate TTS audio from the answer text (without markdown formatting)
+                    tts_audio = generate_tts(replaced_answer)
+                    if not tts_audio:
+                        print(f"❌ Failed to generate TTS")
+                        return
+                    tts_buf = io.BytesIO(tts_audio)
+                    tts_file = discord.File(tts_buf, filename="response.ogg")
+
+                    # Add TTS file to the files list
+                    if files_param:
+                        files_param.append(tts_file)
+                    else:
+                        files_param = [tts_file]
+
+                    print(f"✅ TTS audio generated successfully")
+                except Exception as e:
+                    print(f"❌ Failed to generate TTS: {e}")
+                    # Continue without TTS if generation fails
+
+            formatted_response = (
+                formatted_response
+                if len(formatted_response) <= 2000
+                else formatted_response[:1997] + "..."
+            )
+
+            if files_param:
+                await request.interaction.followup.send(
+                    content=formatted_response, files=files_param
+                )
             else:
-                if files_param:
-                    await request.interaction.followup.send(
-                        content=formatted_response[:1997] + "...", files=files_param
-                    )
-                else:
-                    await request.interaction.followup.send(
-                        content=formatted_response[:1997] + "..."
-                    )
+                await request.interaction.followup.send(content=formatted_response)
 
             print(f"✅ Successfully processed ask request {request.request_id}")
         else:
@@ -1081,25 +1106,41 @@ async def process_retry_request(request: QueuedRequest) -> None:
             except Exception:
                 files_param = None
 
-            if len(formatted_response) <= 2000:
-                if files_param:
-                    await request.interaction.followup.send(
-                        content=formatted_response, files=files_param
-                    )
-                else:
-                    await request.interaction.followup.send(content=formatted_response)
+            # Generate TTS if requested
+            if request.tts:
+                try:
+                    print(f"🎵 Generating TTS for retry response...")
+                    # Generate TTS audio from the answer text (without markdown formatting)
+                    tts_audio = generate_tts(replaced_answer)
+                    if not tts_audio:
+                        print(f"❌ Failed to generate TTS for retry")
+                        return
+                    tts_buf = io.BytesIO(tts_audio)
+                    tts_file = discord.File(tts_buf, filename="response.ogg")
+
+                    # Add TTS file to the files list
+                    if files_param:
+                        files_param.append(tts_file)
+                    else:
+                        files_param = [tts_file]
+
+                    print(f"✅ TTS audio generated successfully for retry")
+                except Exception as e:
+                    print(f"❌ Failed to generate TTS for retry: {e}")
+                    # Continue without TTS if generation fails
+
+            formatted_response = (
+                formatted_response
+                if len(formatted_response) <= 2000
+                else formatted_response[:1997] + "..."
+            )
+
+            if files_param:
+                await request.interaction.followup.send(
+                    content=formatted_response, files=files_param
+                )
             else:
-                # Truncate if too long
-                question_part = f"**Question:** {filtered_question}\n\n**Answer:** "
-                max_answer_length = 2000 - len(question_part)
-                truncated_answer = replaced_answer[:max_answer_length].rstrip() + "..."
-                final_response = question_part + truncated_answer
-                if files_param:
-                    await request.interaction.followup.send(
-                        content=final_response, files=files_param
-                    )
-                else:
-                    await request.interaction.followup.send(content=final_response)
+                await request.interaction.followup.send(content=formatted_response)
 
             print(f"✅ Successfully processed retry request {request.request_id}")
         else:
@@ -1412,6 +1453,7 @@ async def ask_command(
     interaction: discord.Interaction,
     question: str,
     image: Optional[discord.Attachment] = None,
+    tts: Optional[bool] = False,
 ) -> None:
 
     if not ASK_ENABLE:
@@ -1428,6 +1470,13 @@ async def ask_command(
         )
         return
 
+    if tts and not get_eleven_client():
+        await interaction.response.send_message(
+            "TTS is not enabled. Please contact the server owner.",
+            ephemeral=True,
+        )
+        return
+
     # Rate limiting check (owner bypass)
     owner_id = int(os.getenv("OWNER_ID", "0"))
     user_id = interaction.user.id
@@ -1436,7 +1485,7 @@ async def ask_command(
     request_start_time = datetime.datetime.now()
 
     # Store the question for potential retry
-    store_user_question(user_id, question)
+    store_user_question(user_id, question, tts if tts else False, image)
 
     if user_id != owner_id:  # Not the owner, check rate limit
         current_time = request_start_time
@@ -1446,11 +1495,17 @@ async def ask_command(
             time_diff = current_time - last_used
             minutes_passed = time_diff.total_seconds() / 60
 
-            if minutes_passed < ASK_COMMAND_COOLDOWN_MINUTES:
-                remaining_minutes = int(ASK_COMMAND_COOLDOWN_MINUTES - minutes_passed)
+            limit_minutes = (
+                ASK_COMMAND_COOLDOWN_MINUTES * 5
+                if tts
+                else ASK_COMMAND_COOLDOWN_MINUTES
+            )
+
+            if minutes_passed < limit_minutes:
+                remaining_minutes = int(limit_minutes - minutes_passed)
                 try:
                     await interaction.response.send_message(
-                        f"⏰ Rate limit: You can only ask questions once every {ASK_COMMAND_COOLDOWN_MINUTES} minutes. Please wait {remaining_minutes} more minutes.",
+                        f"⏰ Rate limit: You can only ask questions once every {limit_minutes} minutes {'(TTS)' if tts else ''}. Please wait {remaining_minutes} more minutes.",
                         ephemeral=True,
                     )
                 except discord.errors.NotFound:
@@ -1997,6 +2052,7 @@ async def ask_command(
         user_id,
         priority=1 if user_id == owner_id else 0,  # Owner gets higher priority
         media_parts=media_parts,
+        tts=tts if tts else False,
     )
 
     # Don't send a processing message - let the "thinking..." state remain
@@ -2815,7 +2871,18 @@ async def on_interaction(interaction: discord.Interaction) -> None:
 
                 # Find the question by hash
                 if button_user_id in RECENT_QUESTIONS:
-                    for question in RECENT_QUESTIONS[button_user_id]:
+                    for question_data in RECENT_QUESTIONS[button_user_id]:
+                        # Unpack the question data tuple (question, tts, image)
+                        if len(question_data) >= 3:
+                            question, tts, image = question_data
+                        elif len(question_data) == 2:
+                            question, tts = question_data
+                            image = None
+                        else:
+                            question = question_data[0] if question_data else ""
+                            tts = False
+                            image = None
+
                         if str(hash(question) % 1000000) == question_hash:
                             # Found the question: load original context if available
                             loaded_context = load_retry_context(custom_id) or ""
@@ -2874,6 +2941,7 @@ async def on_interaction(interaction: discord.Interaction) -> None:
                                 button_user_id,
                                 priority=2,  # Retries get higher priority
                                 media_parts=retry_media_parts,
+                                tts=tts,
                             )
 
                             # Send confirmation
