@@ -6,5 +6,4 @@ Pillow>=10,<12
 elevenlabs>=2.9.2,<3
 markdown_it_py>=4.0.0,<5
 mdit_plain>=1.0.1,<2
-numpy>=2.2.6,<3
-soundfile>=0.13.1,<1
+ffmpeg>=1.4,<2

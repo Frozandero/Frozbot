@@ -7,7 +7,7 @@ import asyncio
 import concurrent.futures
 import uuid
 import io
-from typing import Optional, Dict, Any, cast
+from typing import Optional, Dict, Any
 from dataclasses import dataclass
 from enum import Enum
 from google.genai import errors, types

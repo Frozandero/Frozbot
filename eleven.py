@@ -1,12 +1,10 @@
 import os
 import re
+import subprocess
 
 from elevenlabs import ElevenLabs
 from markdown_it import MarkdownIt
 from mdit_plain.renderer import RendererPlain
-
-import soundfile as sf
-import numpy as np
 
 ELEVEN_CLIENT = None
 VOICE_ID = None
@@ -36,10 +34,10 @@ def generate_tts(text: str) -> bytes:
             text=cleanup_text_for_tts(text),
             voice_id=get_voice_id(),
             model_id="eleven_flash_v2_5",
-            output_format="pcm_16000",
+            output_format="mp3_22050_32",
         )
 
-        return convert_pcm_to_ogg(b"".join(tts_bytes))
+        return mp3_bytes_to_ogg(b"".join(tts_bytes))
 
     except Exception as e:
         print(f"Error generating TTS: {e}")
@@ -50,21 +48,35 @@ def cleanup_text_for_tts(text: str) -> str:
     """Cleans up text from Discord emotes and markdown formatting."""
     # Remove Discord emotes
     # Replace Discord emotes with just their name (e.g., <a:wave:1234> -> wave)
-    text = re.sub(r"<a?:([a-zA-Z0-9_]+):[0-9]+>", r"\1", text)
+    formatted_text = re.sub(r"<a?:([a-zA-Z0-9_]+):[0-9]+>", r"\1", text)
+
+    # remove @user's @ (usernames can have punctuation)
+    formatted_text = re.sub(r"@([a-zA-Z0-9_]+)", r"\1", formatted_text)
+
     # Remove markdown formatting
     parser = MarkdownIt(renderer_cls=RendererPlain)  # type: ignore
-    text = parser.render(text)
-    return text
+    formatted_text = parser.render(formatted_text)
+    return formatted_text
 
 
-def convert_pcm_to_ogg(pcm_bytes: bytes) -> bytes:
-
-    # Convert raw PCM bytes to NumPy array
-    pcm_array = np.frombuffer(pcm_bytes, dtype=np.int16)
-
-    # Save directly to a memory buffer in OGG Vorbis format
-    import io
-
-    buffer = io.BytesIO()
-    sf.write(buffer, pcm_array, samplerate=16000, format="OGG", subtype="VORBIS")
-    return buffer.getvalue()
+def mp3_bytes_to_ogg(mp3_bytes: bytes) -> bytes:
+    """
+    Convert MP3 bytes to OGG Vorbis bytes using ffmpeg (no pydub).
+    """
+    process = subprocess.Popen(
+        [
+            "ffmpeg",
+            "-i",
+            "pipe:0",  # input from stdin
+            "-f",
+            "ogg",  # output format
+            "-c:a",
+            "libvorbis",  # encode as Vorbis
+            "pipe:1",  # output to stdout
+        ],
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.DEVNULL,
+    )
+    out_bytes, _ = process.communicate(mp3_bytes)
+    return out_bytes
