@@ -69,12 +69,14 @@ def mp3_bytes_to_ogg(mp3_bytes: bytes) -> bytes:
         [
             "ffmpeg",
             "-i",
-            "pipe:0",  # input from stdin
-            "-f",
-            "ogg",  # output format
+            "pipe:0",
+            "-ar",
+            "48000",  # resample to 48kHz
             "-c:a",
-            "libvorbis",  # encode as Vorbis
-            "pipe:1",  # output to stdout
+            "libopus",
+            "-b:a",
+            "32k",
+            "pipe:1",
         ],
         stdin=subprocess.PIPE,
         stdout=subprocess.PIPE,
