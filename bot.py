@@ -32,7 +32,7 @@ from database import (
     remove_banned_user,
     is_banned,
 )
-from eleven import generate_tts
+from eleven import generate_tts, get_eleven_client
 from llm import get_gemini_client, summarize_messages_with_gemini, try_gemini_models
 
 # Initialize profanity filter
@@ -1466,6 +1466,13 @@ async def ask_command(
     if is_banned(interaction.user.id):
         await interaction.response.send_message(
             "You are banned from using the ask command.",
+            ephemeral=True,
+        )
+        return
+
+    if tts and not get_eleven_client():
+        await interaction.response.send_message(
+            "TTS is not enabled. Please contact the server owner.",
             ephemeral=True,
         )
         return

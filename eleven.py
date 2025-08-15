@@ -13,7 +13,10 @@ VOICE_ID = None
 def get_eleven_client():
     global ELEVEN_CLIENT
     if not ELEVEN_CLIENT:
-        ELEVEN_CLIENT = ElevenLabs(api_key=os.getenv("ELEVENLABS_API_KEY"))
+        if os.getenv("ELEVENLABS_API_KEY"):
+            ELEVEN_CLIENT = ElevenLabs(api_key=os.getenv("ELEVENLABS_API_KEY"))
+        else:
+            raise Exception("ElevenLabs API key not found")
     return ELEVEN_CLIENT
 
 
@@ -29,7 +32,6 @@ def get_voice_id() -> str:
 def generate_tts(text: str) -> bytes:
     try:
         client = get_eleven_client()
-
         tts_bytes = client.text_to_speech.convert(
             text=cleanup_text_for_tts(text),
             voice_id=get_voice_id(),
