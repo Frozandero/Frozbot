@@ -34,7 +34,6 @@ from database import (
 )
 from eleven import generate_tts, get_eleven_client
 from llm import get_gemini_client, summarize_messages_with_gemini, try_gemini_models
-from mc import get_whitelist, unwhitelist_player, whitelist_player
 
 # Initialize profanity filter
 profanity.load_censor_words()
@@ -3048,35 +3047,6 @@ async def refresh_commands(interaction: discord.Interaction) -> None:
         except discord.errors.NotFound:
             print("Interaction not found when sending refresh error message")
             return
-
-
-@tree.command(
-    name="whitelist",
-    description="Whitelist a player",
-    guild=None,
-)
-async def whitelist_command(interaction: discord.Interaction, player_name: str) -> None:
-    await interaction.response.send_message(whitelist_player(player_name))
-
-
-@tree.command(
-    name="unwhitelist",
-    description="Unwhitelist a player",
-    guild=None,
-)
-async def unwhitelist_command(
-    interaction: discord.Interaction, player_name: str
-) -> None:
-    await interaction.response.send_message(unwhitelist_player(player_name))
-
-
-@tree.command(
-    name="getwhitelist",
-    description="Get the whitelist",
-    guild=None,
-)
-async def get_whitelist_command(interaction: discord.Interaction) -> None:
-    await interaction.response.send_message(get_whitelist())
 
 
 @client.event
