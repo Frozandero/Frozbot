@@ -2162,40 +2162,79 @@ async def imagine_command(
         # Log image processing error but continue without image
         print(f"Failed to process image attachment: {e}")
 
-    # Call Gemini image generation in a worker thread to avoid blocking the event loop
-    model_name = "gemini-2.0-flash-preview-image-generation"
-    print(f"🖼️ Generating image with model: {model_name}")
+    # Extract mentioned users from the prompt
+    mentioned_users_context = []
+    import re
 
-    nsfw_channel = interaction.channel.is_nsfw() if interaction.channel else False  # type: ignore
-    safety_settings = []
-    if not nsfw_channel:
-        safety_settings.append(
-            types.SafetySetting(
-                category=types.HarmCategory.HARM_CATEGORY_SEXUALLY_EXPLICIT,
-                threshold=types.HarmBlockThreshold.BLOCK_MEDIUM_AND_ABOVE,
-            )
-        )
+    mention_pattern = r"<@!?(\d+)>"
+    matches = re.findall(mention_pattern, prompt)
+
+    # Create a copy of the prompt to modify
+    processed_prompt = prompt
+
+    for user_id_str in matches:
+        try:
+            user_id = int(user_id_str)
+
+            # Try to find the user in the server first
+            if interaction.guild:
+                member = interaction.guild.get_member(user_id)
+                if member:
+                    # Fetch user metadata
+                    user_metadata = {
+                        "name": member.display_name,
+                        "username": member.name,
+                        "roles": [
+                            role.name for role in member.roles[1:]
+                        ],  # Skip @everyone role
+                        "top_role": (
+                            member.top_role.name if member.top_role else "No roles"
+                        ),
+                    }
+                    mentioned_users_context.append(user_metadata)
+
+                    # Replace the mention with the display name in the prompt
+                    processed_prompt = processed_prompt.replace(
+                        f"<@{user_id}>", f"@{member.display_name}"
+                    )
+                    processed_prompt = processed_prompt.replace(
+                        f"<@!{user_id}>", f"@{member.display_name}"
+                    )
+
+                    # Add profile picture to image parts if needed
+                    if member.avatar:
+                        print(
+                            f"Adding profile picture to image parts for user {user_id}"
+                        )
+                        avatar_bytes = await member.avatar.read()
+                        avatar_img = Image.open(io.BytesIO(avatar_bytes))
+                        image_parts.append(avatar_img)
+
+        except Exception as e:
+            print(f"Error processing user mention {user_id_str}: {e}")
 
     # Prepare content based on whether we have an input image
     if image_parts:
         # Image-to-image generation: combine image and text prompt
-        formatted_prompt = f"Based on the provided image, {prompt}"
+        formatted_prompt = f"Do not user user id's instead use the name of the user. Based on the provided image(s), {processed_prompt}"
         contents = [*image_parts, formatted_prompt]
         print(f"🖼️ Using image-to-image generation")
     else:
         # Text-to-image generation: just the text prompt
-        formatted_prompt = f"Generate an image from the following prompt: {prompt}"
+        formatted_prompt = (
+            f"Generate an image from the following prompt: {processed_prompt}"
+        )
         contents = formatted_prompt
         print(f"🖼️ Using text-to-image generation")
 
     def call_gemini_image_api():
         gemini_client = get_gemini_client()
         return gemini_client.models.generate_content(  # type: ignore
-            model=model_name,
+            model="gemini-2.0-flash-preview-image-generation",
             contents=contents,
             config=types.GenerateContentConfig(
                 response_modalities=["TEXT", "IMAGE"],
-                safety_settings=safety_settings,
+                safety_settings=[],
             ),
         )
 
