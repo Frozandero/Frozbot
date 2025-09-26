@@ -2154,7 +2154,10 @@ async def imagine_command(
         if image and getattr(image, "content_type", "").startswith("image/"):
             image_bytes = await image.read()
             pil_img = Image.open(io.BytesIO(image_bytes))
-            image_parts = [pil_img]
+            # Convert image to RGB mode if it's not already
+            if pil_img.mode != "RGB":
+                pil_img = pil_img.convert("RGB")
+            image_parts.append(pil_img)
             print(
                 f"🖼️ Image input detected: {image.content_type}, size: {len(image_bytes)} bytes"
             )
@@ -2208,6 +2211,9 @@ async def imagine_command(
                         )
                         avatar_bytes = await member.avatar.read()
                         avatar_img = Image.open(io.BytesIO(avatar_bytes))
+                        # Convert image to RGB mode if it's not already
+                        if avatar_img.mode != "RGB":
+                            avatar_img = avatar_img.convert("RGB")
                         image_parts.append(avatar_img)
 
         except Exception as e:
