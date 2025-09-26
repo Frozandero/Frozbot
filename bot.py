@@ -2205,11 +2205,11 @@ async def imagine_command(
                     )
 
                     # Add profile picture to image parts if needed
-                    if member.avatar:
+                    if member.display_avatar:
                         print(
                             f"Adding profile picture to image parts for user {user_id}"
                         )
-                        avatar_bytes = await member.avatar.read()
+                        avatar_bytes = await member.display_avatar.read()
                         avatar_img = Image.open(io.BytesIO(avatar_bytes))
                         # Convert image to RGB mode if it's not already
                         if avatar_img.mode != "RGB":
