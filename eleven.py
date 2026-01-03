@@ -54,6 +54,11 @@ def cleanup_text_for_tts(text: str) -> str:
     # Replace Discord emotes with just their name (e.g., <a:wave:1234> -> wave)
     formatted_text = re.sub(r"<a?:([a-zA-Z0-9_]+):[0-9]+>", r"\1", text)
 
+    # Also handle unfound emoji patterns that remain as :name: format
+    # (These are custom emoji names that couldn't be resolved to Discord emojis)
+    # Replace :emoji_name: with just "emoji_name" for natural speech
+    formatted_text = re.sub(r":([a-zA-Z0-9_]{2,32}):", r"\1", formatted_text)
+
     # remove @user's @ (usernames can have punctuation)
     formatted_text = re.sub(r"@([a-zA-Z0-9_]+)", r"\1", formatted_text)
 

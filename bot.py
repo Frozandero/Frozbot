@@ -251,6 +251,14 @@ async def replace_guild_emojis_in_text(
         print(f"⚠️ Error accessing guild ID: {e}")
         return text
 
+    # Pre-process: Normalize Unicode colon variants to ASCII colons
+    # The LLM sometimes outputs fullwidth colons (：), small colons (﹕), or other Unicode variants
+    unicode_colon_variants = ["：", "﹕", "︓", "꞉", "∶"]
+    for variant in unicode_colon_variants:
+        if variant in text:
+            print(f"🔧 Normalizing Unicode colon variant '{variant}' to ASCII ':'")
+            text = text.replace(variant, ":")
+
     # Pre-process: Fix malformed Discord emoji patterns like <:name:> or <a:name:> (missing ID)
     # The LLM sometimes outputs these incorrectly formatted emojis; strip the brackets so we can process them
     malformed_emoji_pattern = re.compile(r"<(a?):([A-Za-z0-9_]{2,32}):>")
@@ -314,10 +322,12 @@ async def replace_guild_emojis_in_text(
                     return emoji_str
                 except Exception as e:
                     print(f"❌ Error converting emoji {emoji} to string: {e}")
-                    return m.group(0)
+                    # Strip colons if conversion fails - shows just the name
+                    return name
             else:
-                print(f"⚠️ No emoji found for :{name}:")
-                return m.group(0)
+                print(f"⚠️ No emoji found for :{name}:, stripping colons")
+                # Strip the colons to make text readable instead of showing :name:
+                return name
 
         result = pattern.sub(_sub, text)
         print(
