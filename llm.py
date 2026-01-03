@@ -30,7 +30,7 @@ async def try_gemini_models(
 
     # Define models to try in order of preference
     models_to_try = [
-        "gemini-3-flash"  # Newest and bestest
+        "gemini-3-flash",  # Newest and bestest
         "gemini-2.5-pro",  # Best quality, highest quota
         "gemini-2.5-flash",  # Good quality, medium quota
         "gemini-2.5-flash-lite",  # Basic quality, highest quota
@@ -39,13 +39,14 @@ async def try_gemini_models(
     ]
 
     tools_for_supporting_models = [URL_CONTEXT_TOOL]
-    thinking_budgets = [512, 256, 0, 0, 0]
+    thinking_budgets = [512, 512, 256, 0, 0, 0]  # 6 models
     tools = [
-        tools_for_supporting_models,
-        tools_for_supporting_models,
-        tools_for_supporting_models,
-        tools_for_supporting_models,
-        [],
+        tools_for_supporting_models,  # gemini-3-flash
+        tools_for_supporting_models,  # gemini-2.5-pro
+        tools_for_supporting_models,  # gemini-2.5-flash
+        tools_for_supporting_models,  # gemini-2.5-flash-lite
+        tools_for_supporting_models,  # gemini-2.0-flash
+        [],  # gemini-2.0-flash-lite
     ]
 
     for i, (model_name, thinking_budget) in enumerate(
@@ -67,6 +68,7 @@ async def try_gemini_models(
                             thinking_budget=thinking_budget
                         ),
                         tools=tools[i],
+                        temperature=0.9,  # Add variability to prevent repetitive responses
                     ),
                     contents=request_contents,
                 )
@@ -127,6 +129,7 @@ async def try_gemini_models(
                                 thinking_config=types.ThinkingConfig(
                                     thinking_budget=thinking_budget
                                 ),
+                                temperature=0.9,  # Add variability to prevent repetitive responses
                             ),
                             contents=request_contents_retry,
                         )

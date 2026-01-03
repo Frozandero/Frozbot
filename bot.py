@@ -812,6 +812,11 @@ async def process_ask_request(request: QueuedRequest) -> None:
 
     try:
         print(f"🤖 Processing ask request: {request.question[:50]}...")
+        # Debug: Log the full context being sent to the LLM
+        print(f"📝 Context length: {len(request.context_string)} chars")
+        print(
+            f"📝 Context preview (first 500 chars): {request.context_string[:500]}..."
+        )
 
         # Try to get response from Gemini with model fallback
         response = await asyncio.wait_for(
@@ -1266,15 +1271,41 @@ async def get_recent_channel_messages(
     channel: Any,
     limit: int,
     max_chars_per_message: int = 200,
-) -> list:
+    self_bot_id: Optional[int] = None,
+    max_self_messages: int = 2,
+) -> tuple[list, list]:
     """Fetch recent channel messages for raw context.
 
-    Returns a list of dicts with author, content, timestamp, attachments, embeds.
-    Skips messages from bots and empty contents with no attachments/embeds.
+    Returns a tuple of:
+        - other_messages: list of dicts for messages from other users
+        - self_messages: list of dicts for this bot's own recent messages (for conversation continuity)
+
+    Skips messages from other bots and empty contents with no attachments/embeds.
+
+    Args:
+        self_bot_id: If provided, track this bot's own messages separately
+        max_self_messages: Maximum number of bot's own messages to include (prevents feedback loops)
     """
-    results: list = []
+    other_messages: list = []
+    self_messages: list = []
     try:
         async for message in channel.history(limit=limit):  # type: ignore
+            # Track bot's own messages separately (limited count for conversation continuity)
+            if self_bot_id and message.author.id == self_bot_id:
+                if len(self_messages) < max_self_messages:
+                    content = message.content.strip() if message.content else ""
+                    if len(content) > max_chars_per_message:
+                        content = content[:max_chars_per_message] + "..."
+                    if content:  # Only include if there's actual content
+                        self_messages.append(
+                            {
+                                "content": content,
+                                "timestamp": message.created_at.strftime(
+                                    "%Y-%m-%d %H:%M"
+                                ),
+                            }
+                        )
+                continue
             if (
                 getattr(message.author, "bot", False)
                 and not CHANNEL_CONTEXT_INCLUDE_BOT_MESSAGES
@@ -1285,7 +1316,7 @@ async def get_recent_channel_messages(
                 content = content[:max_chars_per_message] + "..."
             if not content and not message.attachments and not message.embeds:
                 continue
-            results.append(
+            other_messages.append(
                 {
                     "author": getattr(
                         message.author,
@@ -1300,7 +1331,7 @@ async def get_recent_channel_messages(
             )
     except Exception as e:
         print(f"Error fetching recent channel messages: {e}")
-    return results
+    return other_messages, self_messages
 
 
 async def get_channel_messages_for_summary(
@@ -1892,9 +1923,18 @@ async def ask_command(
 
     # Build channel raw context
     channel_raw_context_str = "None"
+    bot_previous_responses_str = "None"
     if interaction.channel:
-        recent_channel_messages = await get_recent_channel_messages(
-            interaction.channel, CHANNEL_CONTEXT_LAST
+        # Pass bot's ID to track its own messages separately (for conversation continuity)
+        bot_id = client.user.id if client.user else None
+        (
+            recent_channel_messages,
+            bot_recent_messages,
+        ) = await get_recent_channel_messages(
+            interaction.channel,
+            CHANNEL_CONTEXT_LAST,
+            self_bot_id=bot_id,
+            max_self_messages=2,
         )  # type: ignore
         if recent_channel_messages:
             formatted = []
@@ -1908,6 +1948,14 @@ async def ask_command(
                     msg_info += f" (+{msg['embeds']} embeds)"
                 formatted.append(msg_info)
             channel_raw_context_str = "\n".join(formatted)
+        # Format bot's own recent responses (for conversation continuity, not to be copied)
+        if bot_recent_messages:
+            formatted_bot = []
+            for i, msg in enumerate(
+                reversed(bot_recent_messages), 1
+            ):  # Reverse to show oldest first
+                formatted_bot.append(f"{i}. [{msg['timestamp']}] {msg['content']}")
+            bot_previous_responses_str = "\n".join(formatted_bot)
 
     # Build channel summary context with caching
     channel_summary_str = None
@@ -2122,6 +2170,7 @@ async def ask_command(
         f"{emoji_usage_instructions}\n"
         f"{emojis_context_line}\n"
         f"Recent Channel Messages (latest first, up to {CHANNEL_CONTEXT_LAST}):\n{channel_raw_context_str}\n"
+        f"Your recent responses (for conversation continuity - DO NOT repeat these, give fresh responses):\n{bot_previous_responses_str}\n"
         + (
             f"Channel Summary (last {CHANNEL_SUMMARY_DEPTH} messages, cached up to {CHANNEL_SUMMARY_TTL_MIN} min):\n{channel_summary_str}\n"
             if channel_summary_str
@@ -2540,6 +2589,42 @@ async def clear_queue_command(interaction: discord.Interaction) -> None:
     except Exception as e:
         await interaction.response.send_message(
             f"❌ **Error clearing queue**\n\n" f"An error occurred: {str(e)[:200]}...",
+            ephemeral=True,
+        )
+
+
+@tree.command(
+    name="clearcache",
+    description="[Owner Only] Clear the channel summary cache to reset LLM context.",
+    guild=None,
+)
+async def clear_cache_command(interaction: discord.Interaction) -> None:
+    """Clear the channel summary cache (owner only)."""
+    try:
+        # Check if the user is the bot owner
+        owner_id = int(os.getenv("OWNER_ID", "0"))
+        if interaction.user.id != owner_id:
+            await interaction.response.send_message(
+                "❌ **Access Denied**\n\n" "Only the bot owner can clear the cache.",
+                ephemeral=True,
+            )
+            return
+
+        # Clear the channel summary cache
+        cache_size = len(CHANNEL_SUMMARY_CACHE)
+        CHANNEL_SUMMARY_CACHE.clear()
+
+        await interaction.response.send_message(
+            f"🗑️ **Cache Cleared**\n\n"
+            f"✅ Successfully cleared channel summary cache.\n"
+            f"Cleared {cache_size} cached channel summaries.\n"
+            f"New summaries will be generated on next request.",
+            ephemeral=True,
+        )
+
+    except Exception as e:
+        await interaction.response.send_message(
+            f"❌ **Error clearing cache**\n\n" f"An error occurred: {str(e)[:200]}...",
             ephemeral=True,
         )
 
@@ -3191,6 +3276,17 @@ async def on_message(message: discord.Message) -> None:
     if client.user is None or client.user not in message.mentions:
         return
 
+    # Check if the mention is explicit in the message content (not just a reply ping)
+    # This prevents the bot from responding to every reply to its messages
+    bot_mention_patterns = [f"<@{client.user.id}>", f"<@!{client.user.id}>"]
+    has_explicit_mention = any(
+        pattern in message.content for pattern in bot_mention_patterns
+    )
+
+    # If this is a reply to a message but doesn't explicitly mention the bot, ignore it
+    if message.reference is not None and not has_explicit_mention:
+        return
+
     # Check if ask command is enabled
     if not ASK_ENABLE:
         return
@@ -3419,8 +3515,15 @@ async def on_message(message: discord.Message) -> None:
 
         # Channel raw context
         channel_raw_context_str = "None"
-        recent_channel_messages = await get_recent_channel_messages(
-            message.channel, CHANNEL_CONTEXT_LAST
+        # Pass bot's ID to exclude its own messages from context (prevents feedback loops)
+        bot_id = client.user.id if client.user else None
+        recent_channel_messages, bot_recent_messages = (
+            await get_recent_channel_messages(
+                message.channel,
+                CHANNEL_CONTEXT_LAST,
+                self_bot_id=bot_id,
+                max_self_messages=2,
+            )
         )
         if recent_channel_messages:
             formatted = []
@@ -3434,6 +3537,16 @@ async def on_message(message: discord.Message) -> None:
                     msg_info += f" (+{msg['embeds']} embeds)"
                 formatted.append(msg_info)
             channel_raw_context_str = "\n".join(formatted)
+
+        # Format bot's own recent responses (for conversation continuity, not to be copied)
+        bot_previous_responses_str = "None"
+        if bot_recent_messages:
+            formatted_bot = []
+            for i, msg in enumerate(
+                reversed(bot_recent_messages), 1
+            ):  # Reverse to show oldest first
+                formatted_bot.append(f"{i}. [{msg['timestamp']}] {msg['content']}")
+            bot_previous_responses_str = "\n".join(formatted_bot)
 
         # Channel summary (use cached if available)
         channel_summary_str = None
@@ -3570,6 +3683,7 @@ async def on_message(message: discord.Message) -> None:
             f"{emoji_usage_instructions}\n"
             f"{emojis_context_line}\n"
             f"Recent Channel Messages (latest first, up to {CHANNEL_CONTEXT_LAST}):\n{channel_raw_context_str}\n"
+            f"Your recent responses (for conversation continuity - DO NOT repeat these, give fresh responses):\n{bot_previous_responses_str}\n"
             + (
                 f"Channel Summary (last {CHANNEL_SUMMARY_DEPTH} messages, cached up to {CHANNEL_SUMMARY_TTL_MIN} min):\n{channel_summary_str}\n"
                 if channel_summary_str
