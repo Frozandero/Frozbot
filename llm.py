@@ -30,6 +30,7 @@ async def try_gemini_models(
 
     # Define models to try in order of preference
     models_to_try = [
+        "gemini-3-flash"  # Newest and bestest
         "gemini-2.5-pro",  # Best quality, highest quota
         "gemini-2.5-flash",  # Good quality, medium quota
         "gemini-2.5-flash-lite",  # Basic quality, highest quota

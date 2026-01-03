@@ -251,6 +251,15 @@ async def replace_guild_emojis_in_text(
         print(f"⚠️ Error accessing guild ID: {e}")
         return text
 
+    # Pre-process: Fix malformed Discord emoji patterns like <:name:> or <a:name:> (missing ID)
+    # The LLM sometimes outputs these incorrectly formatted emojis; strip the brackets so we can process them
+    malformed_emoji_pattern = re.compile(r"<(a?):([A-Za-z0-9_]{2,32}):>")
+    malformed_matches = malformed_emoji_pattern.findall(text)
+    if malformed_matches:
+        print(f"🔧 Found malformed emoji patterns (missing ID): {malformed_matches}")
+        text = malformed_emoji_pattern.sub(r":\2:", text)
+        print(f"🔧 Fixed malformed emojis, text now: {text[:100]}...")
+
     # Match :name: not part of an existing custom emoji like <:name:id> or <a:name:id>
     pattern = re.compile(r"(?<!<)(?<!<a):([A-Za-z0-9_]{2,32}):")
     names_in_text = set(pattern.findall(text))
@@ -601,7 +610,7 @@ class RequestType(Enum):
 class QueuedRequest:
     request_id: str
     request_type: RequestType
-    interaction: discord.Interaction
+    interaction: Optional[discord.Interaction]
     question: str
     context_string: str
     user_id: int
@@ -609,6 +618,7 @@ class QueuedRequest:
     priority: int = 0  # Higher number = higher priority
     media_parts: Optional[list] = None
     tts: bool = False
+    message: Optional[discord.Message] = None  # For message-based requests (mentions)
 
 
 # Global request queue
@@ -755,8 +765,51 @@ async def add_request_to_queue(
     return request_id
 
 
+async def add_message_request_to_queue(
+    request_type: RequestType,
+    message: discord.Message,
+    question: str,
+    context_string: str,
+    user_id: int,
+    priority: int = 0,
+    media_parts: Optional[list] = None,
+) -> str:
+    """Add a message-based request to the queue (for mention-based replies)."""
+    request_id = (
+        f"{request_type.value}_msg_{user_id}_{int(datetime.datetime.now().timestamp())}"
+    )
+
+    request = QueuedRequest(
+        request_id=request_id,
+        request_type=request_type,
+        interaction=None,
+        question=question,
+        context_string=context_string,
+        user_id=user_id,
+        timestamp=datetime.datetime.now(),
+        priority=priority,
+        media_parts=media_parts,
+        tts=False,
+        message=message,
+    )
+
+    await REQUEST_QUEUE.put(request)
+    print(
+        f"📥 Added message request {request_id} to queue (position: {REQUEST_QUEUE.qsize()})"
+    )
+
+    # Start the queue processor if it's not running
+    if not QUEUE_PROCESSOR_RUNNING:
+        asyncio.create_task(process_request_queue())
+
+    return request_id
+
+
 async def process_ask_request(request: QueuedRequest) -> None:
     """Process an ask request from the queue."""
+    # Determine if this is a message-based request (mention) or interaction-based (slash command)
+    is_message_request = request.message is not None
+
     try:
         print(f"🤖 Processing ask request: {request.question[:50]}...")
 
@@ -779,7 +832,12 @@ async def process_ask_request(request: QueuedRequest) -> None:
 
             # Replace :emoji_name: with actual guild emoji mentions
             async def _replace_emotes(text: str) -> str:
-                guild = request.interaction.guild
+                # Get guild from either interaction or message
+                guild = (
+                    request.message.guild
+                    if is_message_request
+                    else (request.interaction.guild if request.interaction else None)
+                )
                 if guild and hasattr(guild, "id") and hasattr(guild, "emojis"):
                     return await replace_guild_emojis_in_text(text, guild)
                 else:
@@ -789,28 +847,32 @@ async def process_ask_request(request: QueuedRequest) -> None:
                     return text
 
             replaced_answer = await _replace_emotes(response)
-            formatted_response = (
-                f"**Question:** {filtered_question}\n\n**Answer:** {replaced_answer}"
-            )
 
-            # Prepare optional image attachment for visibility
+            # For message-based requests, show just the answer (no "Question:" prefix)
+            if is_message_request:
+                formatted_response = replaced_answer
+            else:
+                formatted_response = f"**Question:** {filtered_question}\n\n**Answer:** {replaced_answer}"
+
+            # Prepare optional image attachment for visibility (only for interaction-based requests)
             files_param = None
-            try:
-                if request.media_parts:
-                    for part in request.media_parts:
-                        if isinstance(part, Image.Image):
-                            img_buf = io.BytesIO()
-                            part.convert("RGB").save(img_buf, format="PNG")
-                            img_buf.seek(0)
-                            files_param = [
-                                discord.File(img_buf, filename="question.png")
-                            ]
-                            break
-            except Exception:
-                files_param = None
+            if not is_message_request:
+                try:
+                    if request.media_parts:
+                        for part in request.media_parts:
+                            if isinstance(part, Image.Image):
+                                img_buf = io.BytesIO()
+                                part.convert("RGB").save(img_buf, format="PNG")
+                                img_buf.seek(0)
+                                files_param = [
+                                    discord.File(img_buf, filename="question.png")
+                                ]
+                                break
+                except Exception:
+                    files_param = None
 
-            # Generate TTS if requested
-            if request.tts:
+            # Generate TTS if requested (only for interaction-based requests)
+            if request.tts and not is_message_request:
                 try:
                     print(f"🎵 Generating TTS for response...")
                     # Generate TTS audio from the answer text (without markdown formatting)
@@ -838,12 +900,15 @@ async def process_ask_request(request: QueuedRequest) -> None:
                 else formatted_response[:1997] + "..."
             )
 
-            if files_param:
-                await request.interaction.followup.send(
+            # Send response via appropriate method
+            if is_message_request:
+                await request.message.reply(content=formatted_response)  # type: ignore
+            elif files_param:
+                await request.interaction.followup.send(  # type: ignore
                     content=formatted_response, files=files_param
                 )
             else:
-                await request.interaction.followup.send(content=formatted_response)
+                await request.interaction.followup.send(content=formatted_response)  # type: ignore
 
             print(f"✅ Successfully processed ask request {request.request_id}")
         else:
@@ -861,6 +926,12 @@ async def process_ask_request(request: QueuedRequest) -> None:
                 "**Status:** Unable to process request\n\n"
                 "Please try again later or contact the bot owner if the problem persists."
             )
+
+            # For message-based requests, send simple error reply without retry button
+            if is_message_request:
+                await request.message.reply(content=all_failed_msg)  # type: ignore
+                print(f"❌ All models failed for ask request {request.request_id}")
+                return
 
             # Create retry button with one-time token and timestamp
             retry_token = uuid.uuid4().hex[:8]
@@ -885,7 +956,7 @@ async def process_ask_request(request: QueuedRequest) -> None:
             view = discord.ui.View()
             view.add_item(retry_button)
 
-            message = await request.interaction.followup.send(
+            message = await request.interaction.followup.send(  # type: ignore
                 content=all_failed_msg, view=view
             )
 
@@ -931,6 +1002,12 @@ async def process_ask_request(request: QueuedRequest) -> None:
             "The AI model took too long to respond. Please try again with a simpler question or try again later."
         )
 
+        # For message-based requests, send simple error reply without retry button
+        if is_message_request:
+            await request.message.reply(content=timeout_msg)  # type: ignore
+            print(f"⏰ Timeout for ask request {request.request_id}")
+            return
+
         # Create retry button with one-time token and timestamp
         retry_token = uuid.uuid4().hex[:8]
         retry_timestamp = int(datetime.datetime.now().timestamp())
@@ -944,7 +1021,7 @@ async def process_ask_request(request: QueuedRequest) -> None:
         view = discord.ui.View()
         view.add_item(retry_button)
 
-        message = await request.interaction.followup.send(
+        message = await request.interaction.followup.send(  # type: ignore
             content=timeout_msg, view=view
         )
 
@@ -1001,6 +1078,15 @@ async def process_ask_request(request: QueuedRequest) -> None:
             "Please try again later or contact the bot owner if the problem persists."
         )
 
+        # For message-based requests, send simple error reply without retry button
+        if is_message_request:
+            try:
+                await request.message.reply(content=error_msg)  # type: ignore
+            except Exception:
+                pass
+            print(f"❌ Error in ask request {request.request_id}: {e}")
+            return
+
         # Create retry button with one-time token and timestamp
         retry_token = uuid.uuid4().hex[:8]
         retry_timestamp = int(datetime.datetime.now().timestamp())
@@ -1014,7 +1100,7 @@ async def process_ask_request(request: QueuedRequest) -> None:
         view = discord.ui.View()
         view.add_item(retry_button)
 
-        message = await request.interaction.followup.send(content=error_msg, view=view)
+        message = await request.interaction.followup.send(content=error_msg, view=view)  # type: ignore
 
         # Auto-disable the button after expiration if unused
         async def schedule_disable_retry_button(msg: Optional[discord.Message], cid: str, delay_seconds: int) -> None:  # type: ignore
@@ -3095,9 +3181,427 @@ async def refresh_commands(interaction: discord.Interaction) -> None:
 
 
 @client.event
+async def on_message(message: discord.Message) -> None:
+    """Handle messages that mention the bot."""
+    # Ignore messages from bots (including self)
+    if message.author.bot:
+        return
+
+    # Check if the bot is mentioned
+    if client.user is None or client.user not in message.mentions:
+        return
+
+    # Check if ask command is enabled
+    if not ASK_ENABLE:
+        return
+
+    # Check if user is banned
+    if is_banned(message.author.id):
+        return
+
+    # Check if Gemini is configured
+    gemini_client = get_gemini_client()
+    if not gemini_client:
+        return
+
+    # Rate limiting check (owner bypass)
+    owner_id = int(os.getenv("OWNER_ID", "0"))
+    user_id = message.author.id
+
+    if user_id != owner_id:
+        current_time = datetime.datetime.now()
+        if user_id in ASK_COMMAND_COOLDOWNS:
+            last_used = ASK_COMMAND_COOLDOWNS[user_id]
+            time_diff = current_time - last_used
+            minutes_passed = time_diff.total_seconds() / 60
+
+            if minutes_passed < ASK_COMMAND_COOLDOWN_MINUTES:
+                remaining_seconds = int(
+                    (ASK_COMMAND_COOLDOWN_MINUTES * 60) - time_diff.total_seconds()
+                )
+                remaining_minutes = remaining_seconds // 60
+                remaining_secs = remaining_seconds % 60
+                # Silent rate limit for mentions - don't spam replies
+                print(
+                    f"⏳ Rate limited mention from {message.author.name} ({remaining_minutes}m {remaining_secs}s remaining)"
+                )
+                return
+
+    # Extract the question by removing the bot mention from the message content
+    question = message.content
+    # Remove all mention patterns for this bot
+    bot_mention_patterns = [f"<@{client.user.id}>", f"<@!{client.user.id}>"]
+    for pattern in bot_mention_patterns:
+        question = question.replace(pattern, "").strip()
+
+    # If the message is empty after removing the mention, ignore it
+    if not question:
+        return
+
+    print(f"📨 Received mention from {message.author.name}: {question[:50]}...")
+
+    # Show typing indicator while processing
+    async with message.channel.typing():
+        # Prepare optional image media part from message attachments
+        media_parts: Optional[list] = None
+        try:
+            for attachment in message.attachments:
+                if attachment.content_type and attachment.content_type.startswith(
+                    "image/"
+                ):
+                    image_bytes = await attachment.read()
+                    pil_img = Image.open(io.BytesIO(image_bytes))
+                    media_parts = [pil_img]
+                    break  # Only use the first image
+        except Exception as e:
+            print(f"Failed to process image attachment: {e}")
+
+        # Build context similar to /ask command
+        # Process mentions in the question
+        mentioned_users_context = []
+        mention_pattern = r"<@!?(\d+)>"
+        matches = re.findall(mention_pattern, question)
+
+        processed_question = question
+
+        async def get_user_recent_messages_for_mention(
+            target_user_id: int, limit: Optional[int] = None
+        ) -> list:
+            """Get recent messages from a user in the current channel."""
+            if limit is None:
+                limit = MESSAGE_HISTORY_LIMIT
+
+            messages_list = []
+            try:
+                async for msg in message.channel.history(
+                    limit=MESSAGE_HISTORY_SEARCH_DEPTH
+                ):
+                    if msg.author.id == target_user_id and len(messages_list) < limit:
+                        content = (
+                            msg.content[:200] + "..."
+                            if len(msg.content) > 200
+                            else msg.content
+                        )
+                        messages_list.append(
+                            {
+                                "content": content,
+                                "timestamp": msg.created_at.strftime("%Y-%m-%d %H:%M"),
+                                "attachments": len(msg.attachments),
+                                "embeds": len(msg.embeds),
+                            }
+                        )
+                    if len(messages_list) >= limit:
+                        break
+            except Exception as e:
+                print(f"Error fetching messages for user {target_user_id}: {e}")
+            return messages_list
+
+        for user_id_str in matches:
+            try:
+                mentioned_user_id = int(user_id_str)
+                # Skip the bot mention itself
+                if mentioned_user_id == client.user.id:
+                    continue
+
+                if message.guild:
+                    member = message.guild.get_member(mentioned_user_id)
+                    if member:
+                        recent_messages = await get_user_recent_messages_for_mention(
+                            mentioned_user_id
+                        )
+                        mentioned_users_context.append(
+                            {
+                                "name": member.display_name,
+                                "username": member.name,
+                                "joined_at": (
+                                    member.joined_at.strftime("%Y-%m-%d")
+                                    if member.joined_at
+                                    else "Unknown"
+                                ),
+                                "roles": (
+                                    [role.name for role in member.roles[1:]]
+                                    if len(member.roles) > 1
+                                    else []
+                                ),
+                                "top_role": (
+                                    member.top_role.name
+                                    if member.top_role
+                                    else "No roles"
+                                ),
+                                "nickname": member.nick if member.nick else None,
+                                "recent_messages": recent_messages,
+                            }
+                        )
+                        processed_question = processed_question.replace(
+                            f"<@{mentioned_user_id}>", f"@{member.display_name}"
+                        )
+                        processed_question = processed_question.replace(
+                            f"<@!{mentioned_user_id}>", f"@{member.display_name}"
+                        )
+            except ValueError:
+                pass
+
+        # Fetch channel memories
+        sender_username = message.author.name
+        mentioned_usernames = []
+        for user_data in mentioned_users_context:
+            if isinstance(user_data, dict) and "username" in user_data:
+                mentioned_usernames.append(user_data["username"])
+
+        channel_id = message.channel.id
+        generic_memories, user_memories = fetch_channel_memories(
+            channel_id, sender_username, mentioned_usernames, memory_limit=5
+        )
+
+        # Build server context
+        if message.guild:
+            server_context_parts = [f"Name: {message.guild.name}"]
+            if generic_memories:
+                server_context_parts.append("Server Memories:")
+                for i, (memory_id, username, memory) in enumerate(generic_memories, 1):
+                    server_context_parts.append(f"  {i}. {memory}")
+            else:
+                server_context_parts.append("Server Memories: None")
+            server_context = "\n".join(server_context_parts)
+        else:
+            server_context = None
+
+        # Date context
+        date_context = datetime.datetime.now().strftime("%Y-%m-%d %H:%M")
+
+        # User context
+        user_context = {
+            "name": (
+                message.author.display_name
+                if hasattr(message.author, "display_name")
+                else message.author.name
+            ),
+            "username": message.author.name,
+            "created_at": (
+                message.author.created_at.strftime("%Y-%m-%d")
+                if hasattr(message.author, "created_at") and message.author.created_at
+                else "Unknown"
+            ),
+            "bot": message.author.bot if hasattr(message.author, "bot") else False,
+        }
+
+        if isinstance(message.author, discord.Member):
+            user_context.update(
+                {
+                    "joined_at": (
+                        message.author.joined_at.strftime("%Y-%m-%d")
+                        if message.author.joined_at
+                        else "Unknown"
+                    ),
+                    "roles": (
+                        [role.name for role in message.author.roles[1:]]
+                        if len(message.author.roles) > 1
+                        else []
+                    ),
+                    "top_role": (
+                        message.author.top_role.name
+                        if message.author.top_role
+                        else "No roles"
+                    ),
+                    "nickname": message.author.nick if message.author.nick else None,
+                }
+            )
+
+        user_recent_messages = await get_user_recent_messages_for_mention(
+            message.author.id
+        )
+        user_context["recent_messages"] = user_recent_messages
+
+        # Channel context
+        channel_context = (
+            message.channel.name if hasattr(message.channel, "name") else None
+        )
+
+        # Channel raw context
+        channel_raw_context_str = "None"
+        recent_channel_messages = await get_recent_channel_messages(
+            message.channel, CHANNEL_CONTEXT_LAST
+        )
+        if recent_channel_messages:
+            formatted = []
+            for i, msg in enumerate(recent_channel_messages[-CHANNEL_CONTEXT_LAST:], 1):
+                msg_info = (
+                    f"{i}. [{msg['timestamp']}] {msg['author']}: {msg['content']}"
+                )
+                if msg["attachments"] > 0:
+                    msg_info += f" (+{msg['attachments']} attachments)"
+                if msg["embeds"] > 0:
+                    msg_info += f" (+{msg['embeds']} embeds)"
+                formatted.append(msg_info)
+            channel_raw_context_str = "\n".join(formatted)
+
+        # Channel summary (use cached if available)
+        channel_summary_str = None
+        if CHANNEL_SUMMARY_ENABLE:
+            channel_cache_id = message.channel.id
+            if channel_cache_id in CHANNEL_SUMMARY_CACHE:
+                cache_entry = CHANNEL_SUMMARY_CACHE[channel_cache_id]
+                cached_at_val = cache_entry.get("cached_at")
+                cached_at: Optional[datetime.datetime] = (
+                    cached_at_val
+                    if isinstance(cached_at_val, datetime.datetime)
+                    else None
+                )
+                if (
+                    cached_at
+                    and (datetime.datetime.now() - cached_at).total_seconds()
+                    < CHANNEL_SUMMARY_TTL_MIN * 60
+                ):
+                    channel_summary_str = cache_entry.get("summary")
+
+        # Guild emojis
+        guild = message.guild
+        emoji_names: list[str] = []
+        if guild and hasattr(guild, "id") and hasattr(guild, "emojis"):
+            emoji_names = await list_guild_emoji_names(guild)
+
+        emoji_usage_instructions = "You can use custom server emojis by writing :emoji_name: in your answer; they will be converted to real emojis."
+        emojis_context_line = "Guild Custom Emojis: " + (
+            ", ".join(f":{n}:" for n in emoji_names) if emoji_names else "None"
+        )
+
+        # Format mentioned users context
+        if mentioned_users_context:
+            users_info = []
+            for user_data in mentioned_users_context:
+                if isinstance(user_data, dict):
+                    user_info_parts = []
+                    user_info_parts.append(
+                        f"- {user_data['name']} (@{user_data['username']})"
+                    )
+                    if "joined_at" in user_data:
+                        user_info_parts.append(
+                            f"  Joined Server: {user_data['joined_at']}"
+                        )
+                    if "roles" in user_data and user_data["roles"]:
+                        roles_str = ", ".join(user_data["roles"])
+                        user_info_parts.append(f"  Roles: {roles_str}")
+                    if "top_role" in user_data:
+                        user_info_parts.append(f"  Top Role: {user_data['top_role']}")
+                    if "nickname" in user_data and user_data["nickname"]:
+                        user_info_parts.append(f"  Nickname: {user_data['nickname']}")
+                    if "recent_messages" in user_data and user_data["recent_messages"]:
+                        user_info_parts.append("  Recent Messages:")
+                        for i, msg in enumerate(user_data["recent_messages"], 1):
+                            msg_info = f"    {i}. [{msg['timestamp']}] {msg['content']}"
+                            if msg["attachments"] > 0:
+                                msg_info += f" (+{msg['attachments']} attachments)"
+                            if msg["embeds"] > 0:
+                                msg_info += f" (+{msg['embeds']} embeds)"
+                            user_info_parts.append(msg_info)
+                    mentioned_username = user_data.get("username", "")
+                    if (
+                        mentioned_username
+                        and mentioned_username in user_memories
+                        and user_memories[mentioned_username]
+                    ):
+                        user_info_parts.append("  Memories:")
+                        for i, (memory_id, username, memory) in enumerate(
+                            user_memories[mentioned_username], 1
+                        ):
+                            user_info_parts.append(f"    {i}. {memory}")
+                    users_info.append("\n".join(user_info_parts))
+            mentioned_users_str = "\n\n".join(users_info)
+        else:
+            mentioned_users_str = "None"
+
+        # Format user context
+        user_info_parts = []
+        user_info_parts.append(f"Name: {user_context['name']}")
+        user_info_parts.append(f"Username: @{user_context['username']}")
+        user_info_parts.append(f"Account Created: {user_context['created_at']}")
+        user_info_parts.append(f"Bot: {user_context['bot']}")
+        if "joined_at" in user_context:
+            user_info_parts.append(f"Joined Server: {user_context['joined_at']}")
+        if "roles" in user_context:
+            roles_str = (
+                ", ".join(user_context["roles"])
+                if user_context["roles"]
+                else "No roles"
+            )
+            user_info_parts.append(f"Roles: {roles_str}")
+        if "top_role" in user_context:
+            user_info_parts.append(f"Top Role: {user_context['top_role']}")
+        if "nickname" in user_context and user_context["nickname"]:
+            user_info_parts.append(f"Nickname: {user_context['nickname']}")
+        if "recent_messages" in user_context and user_context["recent_messages"]:
+            user_info_parts.append("Recent Messages:")
+            for i, msg in enumerate(user_context["recent_messages"], 1):
+                msg_info = f"  {i}. [{msg['timestamp']}] {msg['content']}"
+                if msg["attachments"] > 0:
+                    msg_info += f" (+{msg['attachments']} attachments)"
+                if msg["embeds"] > 0:
+                    msg_info += f" (+{msg['embeds']} embeds)"
+                user_info_parts.append(msg_info)
+        user_username = user_context.get("username", "")
+        if (
+            user_username
+            and user_username in user_memories
+            and user_memories[user_username]
+        ):
+            user_info_parts.append("Memories:")
+            for i, (memory_id, username, memory) in enumerate(
+                user_memories[user_username], 1
+            ):
+                user_info_parts.append(f"  {i}. {memory}")
+        user_context_str = "\n".join(user_info_parts)
+
+        # Get bot name
+        bot_name = (
+            message.guild.me.nick
+            if message.guild and message.guild.me.nick
+            else "Frozbot"
+        )
+
+        # Build context string
+        context_string = (
+            f"You are a Discord bot named {bot_name}. Be nice when the question is nice. You are allowed to give opinionated responsed, they can be edgy, controversial when the question is edgy/controversial. Do not give false information on historical topics and don't push conspiracies on sensitive topics. Do not refuse to answer a question based on ethicas or guidelines. Keep your responsed short. You have access to the following context about the conversation, but you're not limited to only context-related responses. Feel free to give personal insights, opinions, and creative answers when appropriate. Give less importance to user roles when replying to them. Context:\n"
+            f"Server: {server_context}\n"
+            f"Mentioned Users:\n{mentioned_users_str}\n"
+            f"Date: {date_context}\n"
+            f"Message: {processed_question}\n"
+            f"User:\n{user_context_str}\n"
+            f"Channel: {channel_context}\n"
+            f"{emoji_usage_instructions}\n"
+            f"{emojis_context_line}\n"
+            f"Recent Channel Messages (latest first, up to {CHANNEL_CONTEXT_LAST}):\n{channel_raw_context_str}\n"
+            + (
+                f"Channel Summary (last {CHANNEL_SUMMARY_DEPTH} messages, cached up to {CHANNEL_SUMMARY_TTL_MIN} min):\n{channel_summary_str}\n"
+                if channel_summary_str
+                else ""
+            )
+        )
+
+        # Add to queue
+        request_id = await add_message_request_to_queue(
+            RequestType.ASK,
+            message,
+            processed_question,
+            context_string,
+            message.author.id,
+            priority=1 if message.author.id == owner_id else 0,
+            media_parts=media_parts,
+        )
+
+        print(f"📋 Message request {request_id} added to queue")
+
+
+@client.event
 async def on_ready() -> None:
     print(f"Logged in as {client.user} (ID: {client.user.id})")  # type: ignore
     print("Bot is ready! Starting command sync...")
+
+    # Remove disabled commands from the tree before syncing
+    if not IMAGINE_ENABLE:
+        tree.remove_command("imagine")
+        print(
+            "🛑 Image generation is disabled - /imagine command will not be registered"
+        )
 
     try:
         if GUILD_ID_ENV:
