@@ -487,6 +487,11 @@ IMAGINE_COMMAND_COOLDOWN_MINUTES = int(
 # Global toggle for image generation
 IMAGINE_ENABLE: bool = os.getenv("IMAGINE_ENABLE", "true").lower() == "true"
 ASK_ENABLE: bool = os.getenv("ASK_ENABLE", "true").lower() == "true"
+# If true, the bot only responds to explicit @mentions, not reply pings
+# If false, the bot also responds when users reply to its messages (Discord auto-mentions)
+REQUIRE_EXPLICIT_MENTION: bool = (
+    os.getenv("REQUIRE_EXPLICIT_MENTION", "false").lower() == "true"
+)
 
 # Store recent questions for retry functionality: user_id -> list of recent questions
 RECENT_QUESTIONS: Dict[int, list] = {}
@@ -3276,16 +3281,16 @@ async def on_message(message: discord.Message) -> None:
     if client.user is None or client.user not in message.mentions:
         return
 
-    # Check if the mention is explicit in the message content (not just a reply ping)
-    # This prevents the bot from responding to every reply to its messages
-    bot_mention_patterns = [f"<@{client.user.id}>", f"<@!{client.user.id}>"]
-    has_explicit_mention = any(
-        pattern in message.content for pattern in bot_mention_patterns
-    )
-
-    # If this is a reply to a message but doesn't explicitly mention the bot, ignore it
-    if message.reference is not None and not has_explicit_mention:
-        return
+    # Optionally check if the mention is explicit in the message content (not just a reply ping)
+    # When REQUIRE_EXPLICIT_MENTION is true, this prevents the bot from responding to every reply
+    if REQUIRE_EXPLICIT_MENTION:
+        bot_mention_patterns = [f"<@{client.user.id}>", f"<@!{client.user.id}>"]
+        has_explicit_mention = any(
+            pattern in message.content for pattern in bot_mention_patterns
+        )
+        # If this is a reply to a message but doesn't explicitly mention the bot, ignore it
+        if message.reference is not None and not has_explicit_mention:
+            return
 
     # Check if ask command is enabled
     if not ASK_ENABLE:
