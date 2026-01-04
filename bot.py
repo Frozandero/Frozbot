@@ -3040,6 +3040,68 @@ async def set_context_include_bots_command(
         )
 
 
+@tree.command(
+    name="say",
+    description="[Owner Only] Make the bot say something. Use TTS to send only audio.",
+    guild=None,
+)
+async def say_command(
+    interaction: discord.Interaction,
+    message: str,
+    tts: bool = False,
+) -> None:
+    """Make the bot say whatever the owner wants (owner only)."""
+    try:
+        owner_id = int(os.getenv("OWNER_ID", "0"))
+        if interaction.user.id != owner_id:
+            await interaction.response.send_message(
+                "❌ **Access Denied**\n\nOnly the bot owner can use this command.",
+                ephemeral=True,
+            )
+            return
+
+        if tts:
+            # Check if ElevenLabs is configured
+            if not os.getenv("ELEVENLABS_API_KEY"):
+                await interaction.response.send_message(
+                    "❌ **TTS Unavailable**\n\nElevenLabs API key not configured.",
+                    ephemeral=True,
+                )
+                return
+
+            # Defer while generating TTS
+            await interaction.response.defer(thinking=True)
+
+            # Generate TTS audio
+            tts_audio = generate_tts(message)
+            if not tts_audio:
+                await interaction.followup.send(
+                    "❌ **TTS Failed**\n\nFailed to generate text-to-speech audio.",
+                    ephemeral=True,
+                )
+                return
+
+            # Send only the audio file (no text)
+            tts_buf = io.BytesIO(tts_audio)
+            tts_file = discord.File(tts_buf, filename="message.ogg")
+            await interaction.followup.send(file=tts_file)
+        else:
+            # Just send the text message
+            await interaction.response.send_message(message)
+
+    except Exception as e:
+        if interaction.response.is_done():
+            await interaction.followup.send(
+                f"❌ **Error**\n\nAn error occurred: {str(e)[:200]}...",
+                ephemeral=True,
+            )
+        else:
+            await interaction.response.send_message(
+                f"❌ **Error**\n\nAn error occurred: {str(e)[:200]}...",
+                ephemeral=True,
+            )
+
+
 # Button interaction handler for retry functionality
 @client.event
 async def on_interaction(interaction: discord.Interaction) -> None:
