@@ -11,7 +11,7 @@ from google.genai import errors, types
 from google import genai
 from google.genai.types import Tool, UrlContext
 
-from .base import LLMProvider
+from .base import LLMProvider, TokenUsage
 
 URL_CONTEXT_TOOL = Tool(url_context=UrlContext())  # type: ignore
 
@@ -50,7 +50,7 @@ class GeminiProvider(LLMProvider):
         question: str,
         context_string: str,
         media_parts: Optional[list] = None,
-    ) -> Optional[str]:
+    ) -> Tuple[Optional[str], TokenUsage]:
         """
         Generate a response using Gemini with model fallback.
 
@@ -60,10 +60,10 @@ class GeminiProvider(LLMProvider):
             media_parts: Optional list of PIL Images
 
         Returns:
-            Response text or None if all models failed
+            Tuple of (response_text, token_usage) where response_text may be None if all models failed
         """
         if not self.is_available():
-            return None
+            return None, TokenUsage()
 
         # Define models to try in order of preference
         models_to_try = [
@@ -124,9 +124,21 @@ class GeminiProvider(LLMProvider):
 
                 print(f"✅ Success with model: {model_name}")
 
+                # Extract token usage from response
+                token_usage = TokenUsage()
+                if hasattr(response, "usage_metadata"):
+                    usage = response.usage_metadata
+                    if hasattr(usage, "prompt_token_count"):
+                        token_usage.input_tokens = usage.prompt_token_count or 0
+                    if hasattr(usage, "candidates_token_count"):
+                        token_usage.output_tokens = usage.candidates_token_count or 0
+                    print(
+                        f"📊 Token usage: {token_usage.input_tokens} input, {token_usage.output_tokens} output (total: {token_usage.total_tokens})"
+                    )
+
                 # Check if response has text attribute
                 if hasattr(response, "text") and response.text:
-                    return response.text
+                    return response.text, token_usage
                 else:
                     print(
                         f"⚠️ Warning: {model_name} returned response without text attribute"
@@ -181,9 +193,23 @@ class GeminiProvider(LLMProvider):
                             )
                         print(f"✅ Success with {model_name} on retry")
 
+                        # Extract token usage from retry response
+                        token_usage = TokenUsage()
+                        if hasattr(response, "usage_metadata"):
+                            usage = response.usage_metadata
+                            if hasattr(usage, "prompt_token_count"):
+                                token_usage.input_tokens = usage.prompt_token_count or 0
+                            if hasattr(usage, "candidates_token_count"):
+                                token_usage.output_tokens = (
+                                    usage.candidates_token_count or 0
+                                )
+                            print(
+                                f"📊 Token usage: {token_usage.input_tokens} input, {token_usage.output_tokens} output (total: {token_usage.total_tokens})"
+                            )
+
                         # Check if response has text attribute
                         if hasattr(response, "text") and response.text:
-                            return response.text
+                            return response.text, token_usage
                         else:
                             print(
                                 f"⚠️ Warning: {model_name} retry returned response without text attribute"
@@ -225,9 +251,11 @@ class GeminiProvider(LLMProvider):
         if client:
             print(f"  - Client type: {type(client)}")
 
-        return None
+        return None, TokenUsage()
 
-    async def summarize_messages(self, serialized_messages: str) -> Optional[str]:
+    async def summarize_messages(
+        self, serialized_messages: str
+    ) -> Tuple[Optional[str], TokenUsage]:
         """
         Summarize a set of messages into 1–2 sentences using Gemini.
 
@@ -235,10 +263,10 @@ class GeminiProvider(LLMProvider):
             serialized_messages: Serialized message history
 
         Returns:
-            Summary text or None if summarization failed
+            Tuple of (summary_text, token_usage) where summary_text may be None if summarization failed
         """
         if not self.is_available():
-            return None
+            return None, TokenUsage()
 
         context_instr = (
             "You are summarizing a Discord channel's recent conversation for an assistant. "
@@ -253,7 +281,7 @@ class GeminiProvider(LLMProvider):
             return await self.generate_response(prompt, context_instr, None)
         except Exception as e:
             print(f"Error summarizing messages: {e}")
-            return None
+            return None, TokenUsage()
 
     async def generate_image(
         self, prompt: str, image_parts: Optional[list] = None

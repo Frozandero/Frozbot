@@ -3,7 +3,7 @@
 import os
 from typing import Optional
 
-from .base import LLMProvider
+from .base import LLMProvider, TokenUsage
 from .gemini import GeminiProvider
 
 

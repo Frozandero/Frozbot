@@ -3,6 +3,7 @@
 from typing import Optional, Tuple
 
 from llm_providers import get_provider
+from llm_providers.base import TokenUsage
 
 # Global provider instance (lazy-loaded)
 _LLM_PROVIDER: Optional[object] = None
@@ -35,7 +36,7 @@ def get_llm_provider():
 
 async def try_gemini_models(
     question: str, context_string: str, media_parts: Optional[list]
-) -> Optional[str]:
+) -> Tuple[Optional[str], TokenUsage]:
     """
     Generate a response using the configured LLM provider.
     
@@ -47,16 +48,16 @@ async def try_gemini_models(
         media_parts: Optional list of media (images, etc.)
         
     Returns:
-        Response text or None if generation failed
+        Tuple of (response_text, token_usage) where response_text may be None if generation failed
     """
     provider = _get_provider()
     if not provider:
-        return None
+        return None, TokenUsage()
     
     return await provider.generate_response(question, context_string, media_parts)
 
 
-async def summarize_messages_with_gemini(serialized_messages: str) -> Optional[str]:
+async def summarize_messages_with_gemini(serialized_messages: str) -> Tuple[Optional[str], TokenUsage]:
     """
     Summarize a set of messages into 1–2 sentences using the configured LLM provider.
     
@@ -66,11 +67,11 @@ async def summarize_messages_with_gemini(serialized_messages: str) -> Optional[s
         serialized_messages: Serialized message history
         
     Returns:
-        Summary text or None if summarization failed
+        Tuple of (summary_text, token_usage) where summary_text may be None if summarization failed
     """
     provider = _get_provider()
     if not provider:
-        return None
+        return None, TokenUsage()
     
     return await provider.summarize_messages(serialized_messages)
 

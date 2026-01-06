@@ -262,10 +262,16 @@ def setup_ask_commands(tree: app_commands.CommandTree, client: discord.Client):
                         if m["embeds"] > 0:
                             line += f" (+{m['embeds']} embeds)"
                         serialized.append(line)
-                    summary = await summarize_messages_with_gemini(
+                    summary, summary_token_usage = await summarize_messages_with_gemini(
                         "\n".join(serialized)
                     )
                     channel_summary_str = summary or None
+                    # Always log token usage after summary request
+                    print(
+                        f"[SUMMARY] Token usage for channel summary: "
+                        f"{summary_token_usage.input_tokens} input, {summary_token_usage.output_tokens} output "
+                        f"(total: {summary_token_usage.total_tokens})"
+                    )
 
                     if isinstance(summary_channel_id, int):
                         config.CHANNEL_SUMMARY_CACHE[summary_channel_id] = {

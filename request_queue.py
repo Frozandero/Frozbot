@@ -254,11 +254,18 @@ async def process_ask_request(request: QueuedRequest) -> None:
         )
 
         # Try to get response from Gemini with model fallback
-        response = await asyncio.wait_for(
+        response, token_usage = await asyncio.wait_for(
             try_gemini_models(
                 request.question, request.context_string, request.media_parts
             ),
             timeout=60.0,
+        )
+
+        # Always log token usage after request completes
+        print(
+            f"[ASK] Token usage for request '{request.question[:50]}...': "
+            f"{token_usage.input_tokens} input, {token_usage.output_tokens} output "
+            f"(total: {token_usage.total_tokens})"
         )
 
         if response:
@@ -418,11 +425,18 @@ async def process_retry_request(request: QueuedRequest) -> None:
     try:
         print(f"[RETRY] Processing retry request: {request.question[:50]}...")
 
-        response = await asyncio.wait_for(
+        response, token_usage = await asyncio.wait_for(
             try_gemini_models(
                 request.question, request.context_string, request.media_parts
             ),
             timeout=60.0,
+        )
+
+        # Always log token usage after request completes
+        print(
+            f"[RETRY] Token usage for request '{request.question[:50]}...': "
+            f"{token_usage.input_tokens} input, {token_usage.output_tokens} output "
+            f"(total: {token_usage.total_tokens})"
         )
 
         if response:

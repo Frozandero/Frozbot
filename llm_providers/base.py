@@ -1,7 +1,21 @@
 """Base LLM Provider interface for Frozbot."""
 
 from abc import ABC, abstractmethod
-from typing import Optional
+from dataclasses import dataclass
+from typing import Optional, Tuple
+
+
+@dataclass
+class TokenUsage:
+    """Token usage information from an LLM request."""
+
+    input_tokens: int = 0
+    output_tokens: int = 0
+
+    @property
+    def total_tokens(self) -> int:
+        """Total tokens used (input + output)."""
+        return self.input_tokens + self.output_tokens
 
 
 class LLMProvider(ABC):
@@ -13,7 +27,7 @@ class LLMProvider(ABC):
         question: str,
         context_string: str,
         media_parts: Optional[list] = None,
-    ) -> Optional[str]:
+    ) -> Tuple[Optional[str], TokenUsage]:
         """
         Generate a response from the LLM.
 
@@ -23,12 +37,14 @@ class LLMProvider(ABC):
             media_parts: Optional list of media (images, etc.)
 
         Returns:
-            Response text or None if generation failed
+            Tuple of (response_text, token_usage) where response_text may be None if generation failed
         """
         pass
 
     @abstractmethod
-    async def summarize_messages(self, serialized_messages: str) -> Optional[str]:
+    async def summarize_messages(
+        self, serialized_messages: str
+    ) -> Tuple[Optional[str], TokenUsage]:
         """
         Summarize a set of messages.
 
@@ -36,7 +52,7 @@ class LLMProvider(ABC):
             serialized_messages: Serialized message history
 
         Returns:
-            Summary text or None if summarization failed
+            Tuple of (summary_text, token_usage) where summary_text may be None if summarization failed
         """
         pass
 
