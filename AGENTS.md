@@ -16,16 +16,32 @@ Frozbot is a feature-rich Discord bot built with Python that provides AI-powered
 
 ```
 frozbot/
-├── bot.py           # Main bot code (3140 lines) - commands, handlers, context building
-├── database.py      # SQLite database operations for memories and banned users
-├── llm.py           # Gemini API integration with model fallback
-├── eleven.py        # ElevenLabs TTS integration and audio processing
-├── database.db      # SQLite database file
+├── bot.py              # Main entry point - creates client, sets up commands
+├── config.py           # Environment variables and global state
+├── context.py          # Context building functions for AI requests
+├── emoji.py            # Emoji handling (replacement, listing, debug)
+├── handlers.py         # Discord event handlers (on_message, on_interaction, on_ready)
+├── iq.py               # Deterministic IQ calculation functions
+├── request_queue.py    # Request queue system for AI processing
+├── retry.py            # Retry media/context persistence
+├── utils.py            # Utility functions (profanity filter, cooldowns)
+├── views.py            # Discord UI views (pagination)
+├── commands/           # Modular command definitions
+│   ├── __init__.py     # Command setup orchestration
+│   ├── admin.py        # Owner-only admin commands
+│   ├── ask.py          # /ask command
+│   ├── imagine.py      # /imagine command
+│   ├── memory.py       # Memory management commands
+│   └── misc.py         # Miscellaneous commands (/iq, /queue, /say)
+├── database.py         # SQLite database operations
+├── llm.py              # Gemini API integration with model fallback
+├── eleven.py           # ElevenLabs TTS integration
+├── database.db         # SQLite database file
 ├── config.env.example  # Example environment configuration
-├── requirements.txt # Python dependencies
-├── deploy.sh        # Deployment script
-├── frozbot.service  # Systemd service file for Linux deployment
-└── venv/            # Virtual environment
+├── requirements.txt    # Python dependencies
+├── deploy.sh           # Deployment script
+├── frozbot.service     # Systemd service file for Linux deployment
+└── venv/               # Virtual environment
 ```
 
 ## Key Features
@@ -136,6 +152,18 @@ CHANNEL_SUMMARY_TTL_MIN=3          # Summary cache duration
 ```
 
 ## Architecture Details
+
+### Modular Organization
+The codebase is organized into logical modules:
+- **config.py**: Centralized configuration and global state management
+- **context.py**: All context building functions for AI requests
+- **emoji.py**: Guild emoji handling and replacement
+- **handlers.py**: Discord event handlers (on_ready, on_message, on_interaction)
+- **request_queue.py**: Async queue for processing AI requests
+- **retry.py**: Media and context persistence for retry functionality
+- **utils.py**: Shared utility functions
+- **views.py**: Discord UI components (pagination views)
+- **commands/**: Slash command definitions split by category
 
 ### Request Queue System
 - Asynchronous queue for handling AI requests
