@@ -20,6 +20,8 @@ from context import (
     format_channel_messages,
     format_bot_previous_responses,
     build_full_context_string,
+    fetch_replied_message_context,
+    format_replied_message_context,
 )
 from database import is_banned
 from emoji import list_guild_emoji_names
@@ -358,17 +360,28 @@ async def _build_message_context(
     media_parts: Optional[list],
 ) -> str:
     """Build context string for a message-based request."""
+    # Fetch replied-to message context if this is a reply
+    replied_context = None
+    replied_author_id = None
+    if message.reference:
+        replied_context = await fetch_replied_message_context(message)
+        if replied_context:
+            replied_author_id = replied_context.get("author_id")
+
     # Process mentions
     mentioned_users_context = []
     mention_pattern = r"<@!?(\d+)>"
     matches = re.findall(mention_pattern, question)
     processed_question = question
+    mentioned_user_ids = set()
 
     for user_id_str in matches:
         try:
             mentioned_user_id = int(user_id_str)
             if mentioned_user_id == client.user.id:
                 continue
+
+            mentioned_user_ids.add(mentioned_user_id)
 
             if message.guild:
                 member = message.guild.get_member(mentioned_user_id)
@@ -406,11 +419,30 @@ async def _build_message_context(
         except ValueError:
             pass
 
+    # Add replied-to message author to mentioned users if not already included
+    if (
+        replied_context
+        and replied_author_id
+        and replied_author_id not in mentioned_user_ids
+    ):
+        author_context = replied_context.get("author_context", {})
+        if author_context:
+            mentioned_users_context.append(author_context)
+            mentioned_user_ids.add(replied_author_id)
+
     # Fetch memories
     sender_username = message.author.name
     mentioned_usernames = [
         u["username"] for u in mentioned_users_context if isinstance(u, dict)
     ]
+    # Also include replied-to message author in memories fetch
+    if replied_context and replied_author_id:
+        author_context = replied_context.get("author_context", {})
+        if author_context and "username" in author_context:
+            author_username = author_context["username"]
+            if author_username not in mentioned_usernames:
+                mentioned_usernames.append(author_username)
+
     channel_id = message.channel.id
     generic_memories, user_memories = fetch_channel_memories(
         channel_id, sender_username, mentioned_usernames, memory_limit=5
@@ -485,6 +517,13 @@ async def _build_message_context(
     )
     user_context_str = format_user_context(user_context, user_memories)
 
+    # Format replied-to message context
+    replied_message_str = None
+    if replied_context:
+        replied_message_str = format_replied_message_context(
+            replied_context, user_memories
+        )
+
     # Get bot name
     bot_name = (
         message.guild.me.nick if message.guild and message.guild.me.nick else "Frozbot"
@@ -503,6 +542,7 @@ async def _build_message_context(
         channel_raw_context_str=channel_raw_context_str,
         bot_previous_responses_str=bot_previous_responses_str,
         channel_summary_str=channel_summary_str,
+        replied_message_str=replied_message_str,
     )
 
     return context_string

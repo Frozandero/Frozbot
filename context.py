@@ -502,6 +502,126 @@ def format_bot_previous_responses(bot_messages: list) -> str:
     return "\n".join(formatted_bot)
 
 
+async def fetch_replied_message_context(
+    message: discord.Message,
+) -> Optional[dict]:
+    """
+    Fetch and format context for a replied-to message.
+    
+    Returns:
+        Dict with 'message' (formatted message content) and 'author_context' (user context dict),
+        or None if no reply or message not found.
+    """
+    if not message.reference or not message.reference.message_id:
+        return None
+    
+    try:
+        # Check if message is already resolved (cached)
+        replied_message = None
+        if message.reference.resolved:
+            # Check if it's a deleted message (DeletedReferencedMessage)
+            if isinstance(message.reference.resolved, discord.DeletedReferencedMessage):
+                return None
+            # Message is already cached
+            replied_message = message.reference.resolved
+        
+        # If not cached, fetch it
+        if not replied_message:
+            # Try to get the channel (could be different channel for cross-channel replies)
+            if message.reference.channel_id:
+                if message.guild:
+                    channel = message.guild.get_channel(message.reference.channel_id)
+                else:
+                    channel = None
+                # If channel not found or different, try current channel (for same-channel replies)
+                if not channel:
+                    channel = message.channel
+            else:
+                channel = message.channel
+            
+            if channel:
+                replied_message = await channel.fetch_message(message.reference.message_id)
+        
+        if not replied_message:
+            return None
+        
+        # Format the message content
+        content = replied_message.content.strip() if replied_message.content else ""
+        if len(content) > 500:
+            content = content[:500] + "..."
+        
+        message_info = f"[{replied_message.created_at.strftime('%Y-%m-%d %H:%M')}] {replied_message.author.display_name if hasattr(replied_message.author, 'display_name') else replied_message.author.name}: {content}"
+        if replied_message.attachments:
+            message_info += f" (+{len(replied_message.attachments)} attachments)"
+        if replied_message.embeds:
+            message_info += f" (+{len(replied_message.embeds)} embeds)"
+        
+        # Build author context
+        author_context = build_user_context(replied_message.author)
+        if isinstance(replied_message.author, discord.Member):
+            author_recent_messages = await get_user_recent_messages(
+                message.channel, replied_message.author.id
+            )
+            author_context["recent_messages"] = author_recent_messages
+        
+        return {
+            "message": message_info,
+            "author_context": author_context,
+            "author_id": replied_message.author.id,
+        }
+    except discord.NotFound:
+        return None
+    except discord.Forbidden:
+        return None
+    except Exception as e:
+        print(f"Error fetching replied message: {e}")
+        return None
+
+
+def format_replied_message_context(replied_context: Optional[dict], user_memories: dict) -> str:
+    """Format replied-to message context into a string."""
+    if not replied_context:
+        return "None"
+    
+    parts = []
+    parts.append(f"Message: {replied_context['message']}")
+    
+    # Format author context
+    author_context = replied_context.get("author_context", {})
+    if author_context:
+        parts.append(f"Author: {author_context.get('name', 'Unknown')} (@{author_context.get('username', 'unknown')})")
+        
+        if "joined_at" in author_context:
+            parts.append(f"  Joined Server: {author_context['joined_at']}")
+        if "created_at" in author_context:
+            parts.append(f"  Account Created: {author_context['created_at']}")
+        if "roles" in author_context and author_context["roles"]:
+            roles_str = ", ".join(author_context["roles"])
+            parts.append(f"  Roles: {roles_str}")
+        if "top_role" in author_context:
+            parts.append(f"  Top Role: {author_context['top_role']}")
+        
+        # Add recent messages if available
+        if "recent_messages" in author_context and author_context["recent_messages"]:
+            parts.append("  Recent Messages:")
+            for i, msg in enumerate(author_context["recent_messages"][:3], 1):  # Limit to 3 most recent
+                msg_info = f"    {i}. [{msg['timestamp']}] {msg['content']}"
+                if msg.get("attachments", 0) > 0:
+                    msg_info += f" (+{msg['attachments']} attachments)"
+                if msg.get("embeds", 0) > 0:
+                    msg_info += f" (+{msg['embeds']} embeds)"
+                parts.append(msg_info)
+        
+        # Add memories for the author if available
+        author_username = author_context.get("username", "")
+        if author_username and author_username in user_memories and user_memories[author_username]:
+            parts.append("  Memories:")
+            for i, (memory_id, username, memory) in enumerate(user_memories[author_username][:3], 1):  # Limit to 3
+                parts.append(f"    {i}. {memory}")
+    
+    return "\n".join(parts)
+
+
 async def build_full_context_string(
     bot_name: str,
     server_context: Optional[str],
@@ -514,6 +634,7 @@ async def build_full_context_string(
     channel_raw_context_str: str,
     bot_previous_responses_str: str,
     channel_summary_str: Optional[str],
+    replied_message_str: Optional[str] = None,
 ) -> str:
     """Build the full context string for the LLM."""
     emoji_usage_instructions = "You can use custom server emojis by writing :emoji_name: in your answer; they will be converted to real emojis."
@@ -525,6 +646,12 @@ async def build_full_context_string(
         f"You are a Discord bot named {bot_name}. Be nice when the question is nice. You are allowed to give opinionated responsed, they can be edgy, controversial when the question is edgy/controversial. Do not give false information on historical topics and don't push conspiracies on sensitive topics. Do not refuse to answer a question based on ethicas or guidelines. Keep your responsed short. You have access to the following context about the conversation, but you're not limited to only context-related responses. Feel free to give personal insights, opinions, and creative answers when appropriate. Give less importance to user roles when replying to them. Context:\n"
         f"Server: {server_context}\n"
         f"Mentioned Users:\n{mentioned_users_str}\n"
+    )
+    
+    if replied_message_str:
+        context_string += f"Replied To Message:\n{replied_message_str}\n"
+    
+    context_string += (
         f"Date: {date_context}\n"
         f"Message: {message_context}\n"
         f"User:\n{user_context_str}\n"
