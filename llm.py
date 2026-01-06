@@ -1,6 +1,6 @@
 """LLM integration module for Frozbot - uses provider system."""
 
-from typing import Optional
+from typing import Optional, Tuple
 
 from llm_providers import get_provider
 
@@ -27,6 +27,10 @@ def get_gemini_client():
     if provider:
         return provider.get_client()
     return None
+
+def get_llm_provider():
+    """Return the underlying LLM provider (or None)."""
+    return _get_provider()
 
 
 async def try_gemini_models(
@@ -69,3 +73,23 @@ async def summarize_messages_with_gemini(serialized_messages: str) -> Optional[s
         return None
     
     return await provider.summarize_messages(serialized_messages)
+
+
+async def generate_image_with_llm(
+    prompt: str, image_parts: Optional[list] = None
+) -> Tuple[Optional[str], Optional[bytes]]:
+    """
+    Generate an image using the configured LLM provider (if supported).
+
+    Args:
+        prompt: Prompt text
+        image_parts: Optional list of PIL Images as references
+
+    Returns:
+        (description_text, image_bytes_png) where either may be None on failure
+    """
+    provider = _get_provider()
+    if not provider or not hasattr(provider, "generate_image"):
+        return None, None
+
+    return await provider.generate_image(prompt, image_parts)

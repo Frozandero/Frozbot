@@ -41,6 +41,24 @@ class LLMProvider(ABC):
         pass
 
     @abstractmethod
+    async def generate_image(
+        self,
+        prompt: str,
+        image_parts: Optional[list] = None,
+    ) -> tuple[Optional[str], Optional[bytes]]:
+        """
+        Generate an image (and optional descriptive text).
+
+        Args:
+            prompt: Prompt text for image generation
+            image_parts: Optional list of PIL Images as references
+
+        Returns:
+            (description_text, image_bytes_png) where either may be None on failure
+        """
+        pass
+
+    @abstractmethod
     def is_available(self) -> bool:
         """
         Check if the provider is available/configured.

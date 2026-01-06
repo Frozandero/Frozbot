@@ -2,7 +2,10 @@
 
 import asyncio
 import concurrent.futures
-from typing import Optional
+import io
+from typing import Optional, Tuple
+
+from PIL import Image
 
 from google.genai import errors, types
 from google import genai
@@ -15,33 +18,33 @@ URL_CONTEXT_TOOL = Tool(url_context=UrlContext())  # type: ignore
 
 class GeminiProvider(LLMProvider):
     """Gemini AI provider implementation."""
-    
+
     def __init__(self, api_key: str):
         """
         Initialize Gemini provider.
-        
+
         Args:
             api_key: Gemini API key
         """
         self.api_key = api_key
         self._client: Optional[genai.Client] = None
-    
+
     def _get_client(self) -> genai.Client:
         """Get or create Gemini client."""
         if not self._client:
             self._client = genai.Client(api_key=self.api_key)
         return self._client
-    
+
     def is_available(self) -> bool:
         """Check if Gemini is available."""
         return self.api_key is not None and len(self.api_key) > 0
-    
+
     def get_client(self):
         """Get the Gemini client (for compatibility)."""
         if not self.is_available():
             return None
         return self._get_client()
-    
+
     async def generate_response(
         self,
         question: str,
@@ -50,18 +53,18 @@ class GeminiProvider(LLMProvider):
     ) -> Optional[str]:
         """
         Generate a response using Gemini with model fallback.
-        
+
         Args:
             question: The user's question
             context_string: System context/instructions
             media_parts: Optional list of PIL Images
-            
+
         Returns:
             Response text or None if all models failed
         """
         if not self.is_available():
             return None
-        
+
         # Define models to try in order of preference
         models_to_try = [
             "gemini-3-flash",  # Newest and bestest
@@ -71,7 +74,7 @@ class GeminiProvider(LLMProvider):
             "gemini-2.0-flash",  # Good quality, medium quota
             "gemini-2.0-flash-lite",  # Basic quality, highest quota
         ]
-        
+
         tools_for_supporting_models = [URL_CONTEXT_TOOL]
         thinking_budgets = [512, 512, 256, 0, 0, 0]  # 6 models
         tools = [
@@ -82,18 +85,22 @@ class GeminiProvider(LLMProvider):
             tools_for_supporting_models,  # gemini-2.0-flash
             [],  # gemini-2.0-flash-lite
         ]
-        
+
         client = self._get_client()
-        
+
         for i, (model_name, thinking_budget) in enumerate(
             zip(models_to_try, thinking_budgets)
         ):
             try:
-                print(f"🔄 Trying model: {model_name} (attempt {i+1}/{len(models_to_try)})")
-                
+                print(
+                    f"🔄 Trying model: {model_name} (attempt {i+1}/{len(models_to_try)})"
+                )
+
                 # Run the Gemini API call in a thread to avoid blocking the event loop
                 def call_gemini_api():
-                    request_contents = [*media_parts, question] if media_parts else question
+                    request_contents = (
+                        [*media_parts, question] if media_parts else question
+                    )
                     return client.models.generate_content(
                         model=model_name,
                         config=types.GenerateContentConfig(
@@ -106,7 +113,7 @@ class GeminiProvider(LLMProvider):
                         ),
                         contents=request_contents,
                     )
-                
+
                 # Use ThreadPoolExecutor to run the blocking API call
                 loop = asyncio.get_event_loop()
                 with concurrent.futures.ThreadPoolExecutor() as executor:
@@ -114,9 +121,9 @@ class GeminiProvider(LLMProvider):
                         loop.run_in_executor(executor, call_gemini_api),
                         timeout=30.0,  # 30 second timeout
                     )
-                
+
                 print(f"✅ Success with model: {model_name}")
-                
+
                 # Check if response has text attribute
                 if hasattr(response, "text") and response.text:
                     return response.text
@@ -128,7 +135,7 @@ class GeminiProvider(LLMProvider):
                     if hasattr(response, "text"):
                         print(f"Response.text value: {response.text}")
                     continue
-                
+
             except asyncio.TimeoutError:
                 print(f"⏰ Timeout for {model_name}, trying next model...")
                 continue
@@ -136,14 +143,19 @@ class GeminiProvider(LLMProvider):
                 if e.code == 429:
                     print(f"⏰ Quota exceeded for {model_name}, trying next model...")
                     continue
-                elif e.code in [500, 502, 503, 504]:  # Server errors that might be temporary
+                elif e.code in [
+                    500,
+                    502,
+                    503,
+                    504,
+                ]:  # Server errors that might be temporary
                     print(f"🔄 Server error ({e.code}) for {model_name}, retrying...")
                     # For server errors, try the same model again once
                     try:
                         print(f"🔄 Retrying {model_name} after server error...")
                         # Add a small delay before retry to avoid overwhelming the service
                         await asyncio.sleep(1)
-                        
+
                         # Define the retry function inline to avoid scope issues
                         def retry_gemini_api():
                             request_contents_retry = (
@@ -160,7 +172,7 @@ class GeminiProvider(LLMProvider):
                                 ),
                                 contents=request_contents_retry,
                             )
-                        
+
                         loop = asyncio.get_event_loop()
                         with concurrent.futures.ThreadPoolExecutor() as executor:
                             response = await asyncio.wait_for(
@@ -168,7 +180,7 @@ class GeminiProvider(LLMProvider):
                                 timeout=30.0,
                             )
                         print(f"✅ Success with {model_name} on retry")
-                        
+
                         # Check if response has text attribute
                         if hasattr(response, "text") and response.text:
                             return response.text
@@ -197,37 +209,37 @@ class GeminiProvider(LLMProvider):
                 print(f"❌ Unexpected error with {model_name}: {str(e)[:100]}...")
                 # Log the full error for debugging
                 import traceback
-                
+
                 print(f"Full error details for {model_name}:")
                 traceback.print_exc()
                 continue
-        
+
         # All models failed
         print("🚫 All models failed")
         print(f"Failed to get response for question: {question[:100]}...")
-        
+
         # Log additional debugging information
         print("🔍 Debugging info:")
         print(f"  - Total models attempted: {len(models_to_try)}")
         print(f"  - Client initialized: {client is not None}")
         if client:
             print(f"  - Client type: {type(client)}")
-        
+
         return None
-    
+
     async def summarize_messages(self, serialized_messages: str) -> Optional[str]:
         """
         Summarize a set of messages into 1–2 sentences using Gemini.
-        
+
         Args:
             serialized_messages: Serialized message history
-            
+
         Returns:
             Summary text or None if summarization failed
         """
         if not self.is_available():
             return None
-        
+
         context_instr = (
             "You are summarizing a Discord channel's recent conversation for an assistant. "
             "Compress only. Do not speculate. Keep it to 1–2 sentences, focusing on the main topics, decisions, or questions. "
@@ -243,3 +255,84 @@ class GeminiProvider(LLMProvider):
             print(f"Error summarizing messages: {e}")
             return None
 
+    async def generate_image(
+        self, prompt: str, image_parts: Optional[list] = None
+    ) -> Tuple[Optional[str], Optional[bytes]]:
+        """
+        Generate an image (and optional descriptive text) using Gemini.
+
+        Args:
+            prompt: Prompt text
+            image_parts: Optional list of PIL Images as references
+
+        Returns:
+            Tuple of (description_text, image_bytes_png) where either may be None
+        """
+        if not self.is_available():
+            return None, None
+
+        client = self._get_client()
+        contents = prompt
+        if image_parts:
+            contents = [*image_parts, prompt]
+
+        def call_gemini_image_api():
+            return client.models.generate_content(
+                model="gemini-2.0-flash-preview-image-generation",
+                contents=contents,
+                config=types.GenerateContentConfig(
+                    response_modalities=["TEXT", "IMAGE"],
+                    safety_settings=[],
+                ),
+            )
+
+        try:
+            loop = asyncio.get_event_loop()
+            with concurrent.futures.ThreadPoolExecutor() as executor:
+                response = await asyncio.wait_for(
+                    loop.run_in_executor(executor, call_gemini_image_api),
+                    timeout=60.0,
+                )
+
+            description: str = ""
+            image_buffer: Optional[io.BytesIO] = None
+
+            try:
+                candidates = getattr(response, "candidates", [])
+                if candidates:
+                    parts = getattr(candidates[0].content, "parts", [])
+                    for part in parts:
+                        if getattr(part, "text", None):
+                            description += (part.text or "") + "\n"
+                        elif (
+                            getattr(part, "inline_data", None) is not None
+                            and image_buffer is None
+                        ):
+                            data = part.inline_data.data
+                            try:
+                                img = Image.open(io.BytesIO(data))
+                                buf = io.BytesIO()
+                                img.convert("RGB").save(buf, format="PNG")
+                                buf.seek(0)
+                                image_buffer = buf
+                            except Exception:
+                                buf = io.BytesIO()
+                                buf.write(data)
+                                buf.seek(0)
+                                image_buffer = buf
+            except Exception:
+                pass
+
+            return description.strip() or None, (
+                image_buffer.getvalue() if image_buffer else None
+            )
+
+        except asyncio.TimeoutError:
+            print("⏰ Image generation timed out for Gemini provider.")
+            return None, None
+        except errors.APIError as e:
+            print(f"❌ Image generation API error ({e.code}): {str(e)[:200]}...")
+            return None, None
+        except Exception as e:
+            print(f"❌ Unexpected image generation error: {str(e)[:200]}...")
+            return None, None

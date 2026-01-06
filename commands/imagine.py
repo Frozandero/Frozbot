@@ -1,7 +1,6 @@
 """Imagine (image generation) command for Frozbot."""
 
 import asyncio
-import concurrent.futures
 import datetime
 import io
 import re
@@ -9,13 +8,12 @@ from typing import Optional
 
 import discord
 from discord import app_commands
-from google.genai import errors, types
 from PIL import Image
 
 import config
 from database import is_banned
 from emoji import replace_guild_emojis_in_text
-from llm import get_gemini_client
+from llm import generate_image_with_llm, get_llm_provider
 from utils import filter_profanity, cleanup_imagine_expired_cooldowns
 
 
@@ -86,9 +84,9 @@ def setup_imagine_commands(tree: app_commands.CommandTree, client: discord.Clien
                 pass
             return
 
-        # Check Gemini client (image generation currently requires Gemini)
-        gemini_client = get_gemini_client()
-        if not gemini_client:
+        # Check LLM provider (image generation requires provider support)
+        provider = get_llm_provider()
+        if not provider:
             print("[ERROR] /imagine attempted but LLM provider is not configured")
             try:
                 await interaction.response.send_message(
@@ -153,69 +151,25 @@ def setup_imagine_commands(tree: app_commands.CommandTree, client: discord.Clien
 
         # Prepare content
         if image_parts:
-            formatted_prompt = f"Do not user user id's instead use the name of the user. Based on the provided image(s), {processed_prompt}"
-            contents = [*image_parts, formatted_prompt]
+            formatted_prompt = f"Do not use user ids; use display names. Based on the provided image(s), {processed_prompt}"
+            prompt_for_llm = formatted_prompt
             print(f"[IMAGE] Using image-to-image generation")
         else:
             formatted_prompt = (
                 f"Generate an image from the following prompt: {processed_prompt}"
             )
-            contents = formatted_prompt
+            prompt_for_llm = formatted_prompt
             print(f"[IMAGE] Using text-to-image generation")
 
-        def call_gemini_image_api():
-            gemini_client = get_gemini_client()
-            return gemini_client.models.generate_content(
-                model="gemini-2.0-flash-preview-image-generation",
-                contents=contents,
-                config=types.GenerateContentConfig(
-                    response_modalities=["TEXT", "IMAGE"],
-                    safety_settings=[],
-                ),
-            )
-
         try:
-            loop = asyncio.get_event_loop()
-            with concurrent.futures.ThreadPoolExecutor() as executor:
-                response = await asyncio.wait_for(
-                    loop.run_in_executor(executor, call_gemini_image_api),
-                    timeout=60.0,
-                )
-
-            # Extract text and image
-            returned_text: str = ""
-            image_buffer: Optional[io.BytesIO] = None
-
-            try:
-                candidates = getattr(response, "candidates", [])
-                if candidates:
-                    parts = getattr(candidates[0].content, "parts", [])
-                    for part in parts:
-                        if getattr(part, "text", None):
-                            returned_text += (part.text or "") + "\n"
-                        elif (
-                            getattr(part, "inline_data", None) is not None
-                            and image_buffer is None
-                        ):
-                            data = part.inline_data.data
-                            try:
-                                img = Image.open(io.BytesIO(data))
-                                buf = io.BytesIO()
-                                img.convert("RGB").save(buf, format="PNG")
-                                buf.seek(0)
-                                image_buffer = buf
-                            except Exception:
-                                buf = io.BytesIO()
-                                buf.write(data)
-                                buf.seek(0)
-                                image_buffer = buf
-            except Exception:
-                pass
+            description_text, image_bytes = await generate_image_with_llm(
+                prompt_for_llm, image_parts if image_parts else None
+            )
 
             filtered_prompt = filter_profanity(prompt)
 
-            # Replace guild emojis
-            display_text = returned_text.strip()
+            # Replace guild emojis in description
+            display_text = (description_text or "").strip()
             if display_text:
                 try:
                     guild = interaction.guild
@@ -236,7 +190,8 @@ def setup_imagine_commands(tree: app_commands.CommandTree, client: discord.Clien
             else:
                 content = header + "Generating image..."
 
-            if image_buffer is not None:
+            if image_bytes is not None:
+                image_buffer = io.BytesIO(image_bytes)
                 files_to_send = [discord.File(image_buffer, filename="imagine.png")]
 
                 # Include input image as reference
@@ -279,14 +234,6 @@ def setup_imagine_commands(tree: app_commands.CommandTree, client: discord.Clien
                 "⏰ Image generation timed out. Please try again later.", ephemeral=True
             )
             print(f"[TIMEOUT] /imagine timeout for user {user_id}: {prompt[:60]}...")
-        except errors.APIError as e:
-            await interaction.followup.send(
-                f"❌ Image generation API error ({e.code}): {str(e)[:180]}...",
-                ephemeral=True,
-            )
-            print(
-                f"[ERROR] /imagine API error for user {user_id} (code {e.code}): {str(e)[:200]}..."
-            )
         except Exception as e:
             await interaction.followup.send(
                 f"❌ Unexpected error during image generation: {str(e)[:180]}...",
