@@ -86,13 +86,13 @@ def setup_imagine_commands(tree: app_commands.CommandTree, client: discord.Clien
                 pass
             return
 
-        # Check Gemini client
+        # Check Gemini client (image generation currently requires Gemini)
         gemini_client = get_gemini_client()
         if not gemini_client:
-            print("[ERROR] /imagine attempted but GEMINI_CLIENT is not configured")
+            print("[ERROR] /imagine attempted but LLM provider is not configured")
             try:
                 await interaction.response.send_message(
-                    "The bot is not configured to use Gemini AI. Please contact the server owner.",
+                    "The bot is not configured with an LLM provider. Please contact the server owner.",
                     ephemeral=True,
                 )
             except discord.errors.NotFound:

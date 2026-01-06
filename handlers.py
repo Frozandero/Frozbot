@@ -95,7 +95,7 @@ def setup_handlers(client: discord.Client, tree: discord.app_commands.CommandTre
         if is_banned(message.author.id):
             return
 
-        # Check if Gemini is configured
+        # Check if LLM provider is configured
         gemini_client = get_gemini_client()
         if not gemini_client:
             return

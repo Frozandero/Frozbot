@@ -115,7 +115,7 @@ def setup_ask_commands(tree: app_commands.CommandTree, client: discord.Client):
         if not gemini_client:
             try:
                 await interaction.response.send_message(
-                    "The bot is not configured to use Gemini AI. Please contact the server owner.",
+                    "The bot is not configured with an LLM provider. Please contact the server owner.",
                     ephemeral=True,
                 )
             except discord.errors.NotFound:

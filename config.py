@@ -33,6 +33,9 @@ IS_DEV_SERVER_COMMAND: Optional[discord.Object] = (
     else None
 )
 
+# LLM Provider Configuration
+LLM_PROVIDER: str = os.getenv("LLM_PROVIDER", "gemini").lower()
+
 # Feature toggles
 CENSOR_MESSAGES: bool = os.getenv("CENSOR_MESSAGES", "false").lower() == "true"
 IMAGINE_ENABLE: bool = os.getenv("IMAGINE_ENABLE", "true").lower() == "true"
