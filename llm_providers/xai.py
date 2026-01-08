@@ -11,6 +11,7 @@ from PIL import Image
 try:
     from xai_sdk import Client
     from xai_sdk.chat import user, system, image as xai_image
+    from xai_sdk.tools import web_search
 
     XAI_SDK_AVAILABLE = True
 except ImportError:
@@ -91,11 +92,8 @@ class XAIProvider(LLMProvider):
             def call_xai_api():
                 # Create chat with store_messages=False for image understanding (as per docs)
                 # But for regular text, we can use store_messages=True for stateful interaction
-                store_msgs = False if media_parts else True
-
                 chat = client.chat.create(
-                    model=model_name,
-                    store_messages=store_msgs,
+                    model=model_name, store_messages=False, tools=[web_search()]
                 )
 
                 # Add system instruction
