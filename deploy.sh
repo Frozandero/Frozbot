@@ -75,6 +75,7 @@ Type=simple
 User=$RUN_USER
 WorkingDirectory=$BOT_DIR
 EnvironmentFile=-$BOT_DIR/.env
+Environment=PYTHONUNBUFFERED=1
 Environment=PATH=$PATH_PREFIX:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 ExecStart=$PYTHON_BIN $BOT_DIR/bot.py
 Restart=always
