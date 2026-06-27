@@ -4,7 +4,7 @@ import asyncio
 import concurrent.futures
 import io
 import base64
-from typing import Optional, Tuple
+from typing import Optional, Tuple, TYPE_CHECKING
 
 from PIL import Image
 
@@ -19,6 +19,11 @@ except ImportError:
 
 from .base import LLMProvider, TokenUsage
 
+if TYPE_CHECKING:
+    from xai_sdk import Client as XAIClient
+else:
+    XAIClient = object
+
 
 class XAIProvider(LLMProvider):
     """xAI (Grok) provider implementation."""
@@ -31,9 +36,9 @@ class XAIProvider(LLMProvider):
             api_key: xAI API key
         """
         self.api_key = api_key
-        self._client: Optional[Client] = None
+        self._client: Optional[XAIClient] = None
 
-    def _get_client(self) -> Client:
+    def _get_client(self) -> XAIClient:
         """Get or create xAI client."""
         if not XAI_SDK_AVAILABLE:
             raise ImportError(

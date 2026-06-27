@@ -18,6 +18,7 @@ A Discord bot that provides IQ calculation and AI chat functionality through a c
   - `bot`
   - `applications.commands`
 - Gemini or xAI API key for AI chat functionality, depending on `LLM_PROVIDER`
+- `google-genai>=2.3.0` is required for Gemini's Interactions API
 
 ### Setup
 1. Clone or open this project.
@@ -94,3 +95,4 @@ The bot supports several configurable parameters that can be set via environment
 - AI responses are context-aware and include server, user, and message history information.
 - Rate limiting applies to non-owner users to prevent spam.
 - The bot uses a queue system to handle multiple requests efficiently.
+- The Gemini provider uses the Interactions API with `store=False`; Frozbot sends its own Discord context each turn instead of relying on server-side Gemini conversation state.

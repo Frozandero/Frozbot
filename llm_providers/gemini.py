@@ -1,19 +1,79 @@
 """Gemini LLM Provider implementation."""
 
 import asyncio
+import base64
 import concurrent.futures
 import io
 from typing import Optional, Tuple
 
 from PIL import Image
 
-from google.genai import errors, types
+from google.genai import errors
 from google import genai
-from google.genai.types import Tool, UrlContext
 
 from .base import LLMProvider, TokenUsage
 
-URL_CONTEXT_TOOL = Tool(url_context=UrlContext())  # type: ignore
+URL_CONTEXT_TOOL = {"type": "url_context"}
+
+
+def _image_to_interaction_block(image: Image.Image) -> dict:
+    """Convert a PIL image into an Interactions API image content block."""
+    buffer = io.BytesIO()
+    image.convert("RGB").save(buffer, format="PNG")
+    return {
+        "type": "image",
+        "data": base64.b64encode(buffer.getvalue()).decode("utf-8"),
+        "mime_type": "image/png",
+    }
+
+
+def _build_interaction_input(prompt: str, media_parts: Optional[list]) -> object:
+    if not media_parts:
+        return prompt
+
+    input_parts = []
+    for media_part in media_parts:
+        if isinstance(media_part, Image.Image):
+            input_parts.append(_image_to_interaction_block(media_part))
+        else:
+            input_parts.append(media_part)
+    input_parts.append({"type": "text", "text": prompt})
+    return input_parts
+
+
+def _extract_token_usage(interaction) -> TokenUsage:
+    usage = getattr(interaction, "usage", None)
+    if usage is None:
+        return TokenUsage()
+
+    return TokenUsage(
+        input_tokens=(
+            getattr(usage, "total_input_tokens", None)
+            or getattr(usage, "input_tokens", None)
+            or 0
+        ),
+        output_tokens=(
+            getattr(usage, "total_output_tokens", None)
+            or getattr(usage, "output_tokens", None)
+            or 0
+        ),
+    )
+
+
+def _extract_interaction_image_bytes(interaction) -> Optional[bytes]:
+    output_image = getattr(interaction, "output_image", None)
+    if output_image is not None and getattr(output_image, "data", None):
+        return base64.b64decode(output_image.data)
+
+    for step in getattr(interaction, "steps", []) or []:
+        if getattr(step, "type", None) != "model_output":
+            continue
+        for content_block in getattr(step, "content", []) or []:
+            if getattr(content_block, "type", None) == "image":
+                data = getattr(content_block, "data", None)
+                if data:
+                    return base64.b64decode(data)
+    return None
 
 
 class GeminiProvider(LLMProvider):
@@ -65,95 +125,65 @@ class GeminiProvider(LLMProvider):
         if not self.is_available():
             return None, TokenUsage()
 
-        # Define models to try in order of preference
         models_to_try = [
-            "gemini-3-flash",  # Newest and bestest
-            "gemini-2.5-pro",  # Best quality, highest quota
-            "gemini-2.5-flash",  # Good quality, medium quota
-            "gemini-2.5-flash-lite",  # Basic quality, highest quota
-            "gemini-2.0-flash",  # Good quality, medium quota
-            "gemini-2.0-flash-lite",  # Basic quality, highest quota
-        ]
-
-        tools_for_supporting_models = [URL_CONTEXT_TOOL]
-        thinking_budgets = [512, 512, 256, 0, 0, 0]  # 6 models
-        tools = [
-            tools_for_supporting_models,  # gemini-3-flash
-            tools_for_supporting_models,  # gemini-2.5-pro
-            tools_for_supporting_models,  # gemini-2.5-flash
-            tools_for_supporting_models,  # gemini-2.5-flash-lite
-            tools_for_supporting_models,  # gemini-2.0-flash
-            [],  # gemini-2.0-flash-lite
+            ("gemini-3.5-flash", "low"),
+            ("gemini-3-flash-preview", "low"),
+            ("gemini-3.1-flash-lite", "minimal"),
+            ("gemini-2.5-flash", "low"),
+            ("gemini-2.5-flash-lite", "minimal"),
+            ("gemini-2.5-pro", "low"),
         ]
 
         client = self._get_client()
 
-        for i, (model_name, thinking_budget) in enumerate(
-            zip(models_to_try, thinking_budgets)
-        ):
+        for i, (model_name, thinking_level) in enumerate(models_to_try):
             try:
                 print(
-                    f"🔄 Trying model: {model_name} (attempt {i+1}/{len(models_to_try)})"
+                    f"[INFO] Trying model: {model_name} (attempt {i+1}/{len(models_to_try)})"
                 )
 
-                # Run the Gemini API call in a thread to avoid blocking the event loop
                 def call_gemini_api():
-                    request_contents = (
-                        [*media_parts, question] if media_parts else question
-                    )
-                    return client.models.generate_content(
+                    return client.interactions.create(
                         model=model_name,
-                        config=types.GenerateContentConfig(
-                            system_instruction=context_string,  # type: ignore
-                            thinking_config=types.ThinkingConfig(
-                                thinking_budget=thinking_budget
-                            ),
-                            tools=tools[i],
-                            temperature=0.9,  # Add variability to prevent repetitive responses
-                        ),
-                        contents=request_contents,
+                        input=_build_interaction_input(question, media_parts),
+                        system_instruction=context_string,
+                        generation_config={
+                            "thinking_level": thinking_level,
+                            "temperature": 0.9,
+                        },
+                        tools=[URL_CONTEXT_TOOL],
+                        store=False,
                     )
 
-                # Use ThreadPoolExecutor to run the blocking API call
                 loop = asyncio.get_event_loop()
                 with concurrent.futures.ThreadPoolExecutor() as executor:
-                    response = await asyncio.wait_for(
+                    interaction = await asyncio.wait_for(
                         loop.run_in_executor(executor, call_gemini_api),
                         timeout=30.0,  # 30 second timeout
                     )
 
-                print(f"✅ Success with model: {model_name}")
+                print(f"[INFO] Success with model: {model_name}")
 
-                # Extract token usage from response
-                token_usage = TokenUsage()
-                if hasattr(response, "usage_metadata"):
-                    usage = response.usage_metadata
-                    if hasattr(usage, "prompt_token_count"):
-                        token_usage.input_tokens = usage.prompt_token_count or 0
-                    if hasattr(usage, "candidates_token_count"):
-                        token_usage.output_tokens = usage.candidates_token_count or 0
-                    print(
-                        f"📊 Token usage: {token_usage.input_tokens} input, {token_usage.output_tokens} output (total: {token_usage.total_tokens})"
-                    )
+                token_usage = _extract_token_usage(interaction)
+                print(
+                    f"[INFO] Token usage: {token_usage.input_tokens} input, {token_usage.output_tokens} output (total: {token_usage.total_tokens})"
+                )
 
-                # Check if response has text attribute
-                if hasattr(response, "text") and response.text:
-                    return response.text, token_usage
+                if getattr(interaction, "output_text", None):
+                    return interaction.output_text, token_usage
                 else:
                     print(
-                        f"⚠️ Warning: {model_name} returned response without text attribute"
+                        f"[WARN] {model_name} returned interaction without output_text"
                     )
-                    print(f"Response object type: {type(response)}")
-                    if hasattr(response, "text"):
-                        print(f"Response.text value: {response.text}")
+                    print(f"Interaction object type: {type(interaction)}")
                     continue
 
             except asyncio.TimeoutError:
-                print(f"⏰ Timeout for {model_name}, trying next model...")
+                print(f"[WARN] Timeout for {model_name}, trying next model...")
                 continue
             except errors.APIError as e:
                 if e.code == 429:
-                    print(f"⏰ Quota exceeded for {model_name}, trying next model...")
+                    print(f"[WARN] Quota exceeded for {model_name}, trying next model...")
                     continue
                 elif e.code in [
                     500,
@@ -161,78 +191,62 @@ class GeminiProvider(LLMProvider):
                     503,
                     504,
                 ]:  # Server errors that might be temporary
-                    print(f"🔄 Server error ({e.code}) for {model_name}, retrying...")
+                    print(f"[INFO] Server error ({e.code}) for {model_name}, retrying...")
                     # For server errors, try the same model again once
                     try:
-                        print(f"🔄 Retrying {model_name} after server error...")
+                        print(f"[INFO] Retrying {model_name} after server error...")
                         # Add a small delay before retry to avoid overwhelming the service
                         await asyncio.sleep(1)
 
-                        # Define the retry function inline to avoid scope issues
                         def retry_gemini_api():
-                            request_contents_retry = (
-                                [*media_parts, question] if media_parts else question
-                            )
-                            return client.models.generate_content(
+                            return client.interactions.create(
                                 model=model_name,
-                                config=types.GenerateContentConfig(
-                                    system_instruction=context_string,  # type: ignore
-                                    thinking_config=types.ThinkingConfig(
-                                        thinking_budget=thinking_budget
-                                    ),
-                                    temperature=0.9,  # Add variability to prevent repetitive responses
-                                ),
-                                contents=request_contents_retry,
+                                input=_build_interaction_input(question, media_parts),
+                                system_instruction=context_string,
+                                generation_config={
+                                    "thinking_level": thinking_level,
+                                    "temperature": 0.9,
+                                },
+                                tools=[URL_CONTEXT_TOOL],
+                                store=False,
                             )
 
                         loop = asyncio.get_event_loop()
                         with concurrent.futures.ThreadPoolExecutor() as executor:
-                            response = await asyncio.wait_for(
+                            interaction = await asyncio.wait_for(
                                 loop.run_in_executor(executor, retry_gemini_api),
                                 timeout=30.0,
                             )
-                        print(f"✅ Success with {model_name} on retry")
+                        print(f"[INFO] Success with {model_name} on retry")
 
-                        # Extract token usage from retry response
-                        token_usage = TokenUsage()
-                        if hasattr(response, "usage_metadata"):
-                            usage = response.usage_metadata
-                            if hasattr(usage, "prompt_token_count"):
-                                token_usage.input_tokens = usage.prompt_token_count or 0
-                            if hasattr(usage, "candidates_token_count"):
-                                token_usage.output_tokens = (
-                                    usage.candidates_token_count or 0
-                                )
-                            print(
-                                f"📊 Token usage: {token_usage.input_tokens} input, {token_usage.output_tokens} output (total: {token_usage.total_tokens})"
-                            )
+                        token_usage = _extract_token_usage(interaction)
+                        print(
+                            f"[INFO] Token usage: {token_usage.input_tokens} input, {token_usage.output_tokens} output (total: {token_usage.total_tokens})"
+                        )
 
-                        # Check if response has text attribute
-                        if hasattr(response, "text") and response.text:
-                            return response.text, token_usage
+                        if getattr(interaction, "output_text", None):
+                            return interaction.output_text, token_usage
                         else:
                             print(
-                                f"⚠️ Warning: {model_name} retry returned response without text attribute"
+                                f"[WARN] Warning: {model_name} retry returned interaction without output_text"
                             )
-                            print(f"Response object type: {type(response)}")
-                            print(f"Response object attributes: {dir(response)}")
-                            if hasattr(response, "text"):
-                                print(f"Response.text value: {response.text}")
+                            print(f"Interaction object type: {type(interaction)}")
+                            print(f"Interaction object attributes: {dir(interaction)}")
                             continue
                     except Exception as retry_error:
                         print(
-                            f"❌ Retry failed for {model_name}: {str(retry_error)[:100]}..."
+                            f"[ERROR] Retry failed for {model_name}: {str(retry_error)[:100]}..."
                         )
                         continue
                 else:
                     # Non-quota, non-server error, log and try next model
                     error_msg = e.message if e.message else str(e)
                     print(
-                        f"❌ Non-quota error with {model_name}: {error_msg[:100]}... (code: {e.code})"
+                        f"[ERROR] Non-quota error with {model_name}: {error_msg[:100]}... (code: {e.code})"
                     )
                     continue
             except Exception as e:
-                print(f"❌ Unexpected error with {model_name}: {str(e)[:100]}...")
+                print(f"[ERROR] Unexpected error with {model_name}: {str(e)[:100]}...")
                 # Log the full error for debugging
                 import traceback
 
@@ -241,11 +255,11 @@ class GeminiProvider(LLMProvider):
                 continue
 
         # All models failed
-        print("🚫 All models failed")
+        print("[ERROR] All models failed")
         print(f"Failed to get response for question: {question[:100]}...")
 
         # Log additional debugging information
-        print("🔍 Debugging info:")
+        print("[INFO] Debugging info:")
         print(f"  - Total models attempted: {len(models_to_try)}")
         print(f"  - Client initialized: {client is not None}")
         if client:
@@ -300,67 +314,55 @@ class GeminiProvider(LLMProvider):
             return None, None
 
         client = self._get_client()
-        contents = prompt
-        if image_parts:
-            contents = [*image_parts, prompt]
+        models_to_try = [
+            "gemini-3.1-flash-image",
+            "gemini-2.5-flash-image",
+        ]
 
-        def call_gemini_image_api():
-            return client.models.generate_content(
-                model="gemini-2.0-flash-preview-image-generation",
-                contents=contents,
-                config=types.GenerateContentConfig(
-                    response_modalities=["TEXT", "IMAGE"],
-                    safety_settings=[],
-                ),
-            )
-
-        try:
-            loop = asyncio.get_event_loop()
-            with concurrent.futures.ThreadPoolExecutor() as executor:
-                response = await asyncio.wait_for(
-                    loop.run_in_executor(executor, call_gemini_image_api),
-                    timeout=60.0,
-                )
-
-            description: str = ""
-            image_buffer: Optional[io.BytesIO] = None
-
+        for model_name in models_to_try:
             try:
-                candidates = getattr(response, "candidates", [])
-                if candidates:
-                    parts = getattr(candidates[0].content, "parts", [])
-                    for part in parts:
-                        if getattr(part, "text", None):
-                            description += (part.text or "") + "\n"
-                        elif (
-                            getattr(part, "inline_data", None) is not None
-                            and image_buffer is None
-                        ):
-                            data = part.inline_data.data
-                            try:
-                                img = Image.open(io.BytesIO(data))
-                                buf = io.BytesIO()
-                                img.convert("RGB").save(buf, format="PNG")
-                                buf.seek(0)
-                                image_buffer = buf
-                            except Exception:
-                                buf = io.BytesIO()
-                                buf.write(data)
-                                buf.seek(0)
-                                image_buffer = buf
-            except Exception:
-                pass
+                def call_gemini_image_api():
+                    return client.interactions.create(
+                        model=model_name,
+                        input=_build_interaction_input(prompt, image_parts),
+                        response_format=[
+                            {"type": "text"},
+                            {"type": "image", "mime_type": "image/png"},
+                        ],
+                        store=False,
+                    )
 
-            return description.strip() or None, (
-                image_buffer.getvalue() if image_buffer else None
-            )
+                loop = asyncio.get_event_loop()
+                with concurrent.futures.ThreadPoolExecutor() as executor:
+                    interaction = await asyncio.wait_for(
+                        loop.run_in_executor(executor, call_gemini_image_api),
+                        timeout=60.0,
+                    )
 
-        except asyncio.TimeoutError:
-            print("⏰ Image generation timed out for Gemini provider.")
-            return None, None
-        except errors.APIError as e:
-            print(f"❌ Image generation API error ({e.code}): {str(e)[:200]}...")
-            return None, None
-        except Exception as e:
-            print(f"❌ Unexpected image generation error: {str(e)[:200]}...")
-            return None, None
+                image_bytes = _extract_interaction_image_bytes(interaction)
+                if image_bytes:
+                    return getattr(interaction, "output_text", None), image_bytes
+
+                print(
+                    f"[WARN] Image generation with {model_name} returned no output image."
+                )
+                continue
+
+            except asyncio.TimeoutError:
+                print(f"[WARN] Image generation timed out for {model_name}.")
+                continue
+            except errors.APIError as e:
+                if e.code == 429:
+                    print(f"[WARN] Quota exceeded for {model_name}, trying next model...")
+                    continue
+                print(
+                    f"[ERROR] Image generation API error with {model_name} ({e.code}): {str(e)[:200]}..."
+                )
+                continue
+            except Exception as e:
+                print(
+                    f"[ERROR] Unexpected image generation error with {model_name}: {str(e)[:200]}..."
+                )
+                continue
+
+        return None, None
