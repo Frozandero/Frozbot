@@ -127,8 +127,20 @@ case "$1" in
             "$SCRIPT_DIR/" "$BOOTSTRAP_DIR/"
 
         chown -R "$BOOTSTRAP_USER:$BOOTSTRAP_USER" "$BOOTSTRAP_DIR"
-        if [ -f "$BOOTSTRAP_DIR/.env" ]; then
+
+        if [ -f "$SCRIPT_DIR/.env" ]; then
+            install -m 600 -o "$BOOTSTRAP_USER" -g "$BOOTSTRAP_USER" "$SCRIPT_DIR/.env" "$BOOTSTRAP_DIR/.env"
+            echo ".env copied to $BOOTSTRAP_DIR/.env"
+            if command -v sha256sum >/dev/null 2>&1; then
+                echo "  Source .env sha256:    $(sha256sum "$SCRIPT_DIR/.env" | awk '{print $1}')"
+                echo "  Installed .env sha256: $(sha256sum "$BOOTSTRAP_DIR/.env" | awk '{print $1}')"
+            fi
+        elif [ -f "$BOOTSTRAP_DIR/.env" ]; then
+            chown "$BOOTSTRAP_USER:$BOOTSTRAP_USER" "$BOOTSTRAP_DIR/.env"
             chmod 600 "$BOOTSTRAP_DIR/.env"
+            echo "No .env found in $SCRIPT_DIR; keeping existing $BOOTSTRAP_DIR/.env"
+        else
+            echo "Warning: no .env found in $SCRIPT_DIR or $BOOTSTRAP_DIR"
         fi
 
         sudo -u "$BOOTSTRAP_USER" python3 -m venv "$BOOTSTRAP_DIR/.venv"
@@ -173,7 +185,7 @@ case "$1" in
     refresh)
         echo "Refreshing commands via Discord refresh command..."
         echo "Use /refresh in your Discord server to refresh commands immediately."
-        echo "Or restart the bot to sync changes: ./deploy.sh restart"
+        echo "Or restart the bot to sync changes: bash deploy.sh restart"
         ;;
     install)
         install_service
