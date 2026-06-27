@@ -71,6 +71,8 @@ Important optional environment:
 
 - Preserve the provider abstraction. New LLM backends should implement `LLMProvider`, be wired in `llm_providers/__init__.py`, and expose config in `config.env.example`.
 - The Gemini provider uses `google-genai>=2.3.0` and the Interactions API (`client.interactions.create`) with `store=False`. Do not reintroduce deprecated `google-generativeai` or `models.generate_content` paths unless intentionally adding a compatibility layer.
+- Gemini text/chat and image-generation fallback models are configurable through `GEMINI_TEXT_IMAGE_MODELS` and `GEMINI_IMAGE_MODELS`; do not hard-code assumptions about the project's billing tier.
+- Slash command registration is config-sensitive at sync time. `ASK_ENABLE` and `IMAGINE_ENABLE` hide commands when false, and TTS options are omitted when ElevenLabs is not configured.
 - Keep slash-command `/ask` and mention-based chat behavior aligned. If you change context assembly in `commands/ask.py`, check whether `_build_message_context()` in `handlers.py` needs the same change.
 - Always defer Discord interactions before long work such as history reads, LLM calls, image processing, TTS, or network fetches.
 - Never call blocking SDK/network work directly on the event loop. Existing provider code uses executors around blocking clients.

@@ -213,6 +213,11 @@ def setup_admin_commands(tree: app_commands.CommandTree, client: discord.Client)
             )
             config_info += "**Image Generation:**\n"
             config_info += f"• Enabled: {config.IMAGINE_ENABLE}\n\n"
+            config_info += "**TTS:**\n"
+            config_info += f"• Configured: {config.is_tts_configured()}\n\n"
+            config_info += "**Command Visibility:**\n"
+            config_info += "• Ask/imagine visibility is decided when slash commands are synced.\n"
+            config_info += "• TTS command options are hidden when ElevenLabs is not configured.\n\n"
             config_info += "**Channel Context Settings:**\n"
             config_info += f"• Last raw messages: {config.CHANNEL_CONTEXT_LAST}\n"
             config_info += f"• Include bot messages (raw context): {config.CHANNEL_CONTEXT_INCLUDE_BOT_MESSAGES}\n"
@@ -356,7 +361,7 @@ def setup_admin_commands(tree: app_commands.CommandTree, client: discord.Client)
             old_value = config.ASK_ENABLE
             config.ASK_ENABLE = bool(enabled)
             await interaction.response.send_message(
-                f"✅ **Ask Command Updated**\n\nOld: {old_value}\nNew: {config.ASK_ENABLE}",
+                f"✅ **Ask Command Updated**\n\nOld: {old_value}\nNew: {config.ASK_ENABLE}\n\nRun `/refresh` to resync command visibility.",
                 ephemeral=True,
             )
 
@@ -393,7 +398,7 @@ def setup_admin_commands(tree: app_commands.CommandTree, client: discord.Client)
             old_value = config.IMAGINE_ENABLE
             config.IMAGINE_ENABLE = bool(enabled)
             await interaction.response.send_message(
-                f"✅ **Image Generation Updated**\n\nOld: {old_value}\nNew: {config.IMAGINE_ENABLE}",
+                f"✅ **Image Generation Updated**\n\nOld: {old_value}\nNew: {config.IMAGINE_ENABLE}\n\nRun `/refresh` to resync command visibility.",
                 ephemeral=True,
             )
         except Exception as e:
@@ -459,10 +464,12 @@ def setup_admin_commands(tree: app_commands.CommandTree, client: discord.Client)
 
         try:
             await interaction.response.defer(ephemeral=True)
+            from commands import rebuild_all_commands
+
+            rebuild_all_commands(tree, client)
 
             if config.GUILD_ID_ENV:
                 test_guild = discord.Object(id=int(config.GUILD_ID_ENV))
-                tree.clear_commands(guild=test_guild)
                 await tree.sync(guild=test_guild)
                 try:
                     await interaction.followup.send(

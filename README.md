@@ -71,7 +71,7 @@ python bot.py
 #### User Commands
 - `/iq [user]` - Get the IQ of a user (or yourself if no user specified)
 - `/ask <question>` - Ask the bot a question using AI
-- `/imagine <prompt> [image]` - Generate an image from a text prompt when the configured provider supports image generation. Optionally include an image for reference/modification
+- `/imagine <prompt> [image]` - Generate an image from a text prompt when the configured provider supports image generation and the configured account has access. Optionally include an image for reference/modification.
 - `/queue` - Check the current request queue status
 
 #### Owner Commands
@@ -96,3 +96,6 @@ The bot supports several configurable parameters that can be set via environment
 - Rate limiting applies to non-owner users to prevent spam.
 - The bot uses a queue system to handle multiple requests efficiently.
 - The Gemini provider uses the Interactions API with `store=False`; Frozbot sends its own Discord context each turn instead of relying on server-side Gemini conversation state.
+- Slash commands are registered from startup config. Set `ASK_ENABLE=false` or `IMAGINE_ENABLE=false` before startup or `/refresh` to hide those commands from Discord.
+- If ElevenLabs is not configured, TTS options are omitted from slash commands.
+- Gemini text/chat and image-generation fallback models can be overridden with `GEMINI_TEXT_IMAGE_MODELS` and `GEMINI_IMAGE_MODELS`.

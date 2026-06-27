@@ -4,6 +4,7 @@ import asyncio
 import base64
 import concurrent.futures
 import io
+import os
 from typing import Optional, Tuple
 
 from PIL import Image
@@ -14,6 +15,39 @@ from google import genai
 from .base import LLMProvider, TokenUsage
 
 URL_CONTEXT_TOOL = {"type": "url_context"}
+
+DEFAULT_TEXT_IMAGE_MODEL_SPECS = [
+    "gemini-3.5-flash:low",
+    "gemini-3-flash-preview:low",
+    "gemini-2.5-pro:low",
+    "gemini-2.5-flash:low",
+    "gemini-3.1-flash-lite:minimal",
+    "gemini-2.5-flash-lite:minimal",
+]
+
+
+def _parse_text_model_specs(raw_value: Optional[str]) -> list[tuple[str, str]]:
+    specs = raw_value.split(",") if raw_value else DEFAULT_TEXT_IMAGE_MODEL_SPECS
+    models = []
+    for spec in specs:
+        parts = spec.strip().split(":", 1)
+        if not parts[0]:
+            continue
+        thinking_level = parts[1].strip() if len(parts) > 1 and parts[1].strip() else "low"
+        models.append((parts[0].strip(), thinking_level))
+    return models
+
+
+GEMINI_TEXT_IMAGE_MODELS = _parse_text_model_specs(os.getenv("GEMINI_TEXT_IMAGE_MODELS"))
+
+GEMINI_IMAGE_MODELS = [
+    model.strip()
+    for model in os.getenv(
+        "GEMINI_IMAGE_MODELS",
+        "gemini-3.1-flash-image,gemini-2.5-flash-image",
+    ).split(",")
+    if model.strip()
+]
 
 
 def _image_to_interaction_block(image: Image.Image) -> dict:
@@ -125,14 +159,7 @@ class GeminiProvider(LLMProvider):
         if not self.is_available():
             return None, TokenUsage()
 
-        models_to_try = [
-            ("gemini-3.5-flash", "low"),
-            ("gemini-3-flash-preview", "low"),
-            ("gemini-3.1-flash-lite", "minimal"),
-            ("gemini-2.5-flash", "low"),
-            ("gemini-2.5-flash-lite", "minimal"),
-            ("gemini-2.5-pro", "low"),
-        ]
+        models_to_try = GEMINI_TEXT_IMAGE_MODELS
 
         client = self._get_client()
 
@@ -314,12 +341,7 @@ class GeminiProvider(LLMProvider):
             return None, None
 
         client = self._get_client()
-        models_to_try = [
-            "gemini-3.1-flash-image",
-            "gemini-2.5-flash-image",
-        ]
-
-        for model_name in models_to_try:
+        for model_name in GEMINI_IMAGE_MODELS:
             try:
                 def call_gemini_image_api():
                     return client.interactions.create(

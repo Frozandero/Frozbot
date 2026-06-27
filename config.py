@@ -36,6 +36,7 @@ IS_DEV_SERVER_COMMAND: Optional[discord.Object] = (
 
 # LLM Provider Configuration
 LLM_PROVIDER: str = os.getenv("LLM_PROVIDER", "gemini").lower()
+ELEVENLABS_API_KEY: Optional[str] = os.getenv("ELEVENLABS_API_KEY")
 
 # Feature toggles
 CENSOR_MESSAGES: bool = os.getenv("CENSOR_MESSAGES", "false").lower() == "true"
@@ -113,3 +114,8 @@ def get_owner_id() -> int:
 def is_owner(user_id: int) -> bool:
     """Check if a user is the bot owner."""
     return user_id == get_owner_id()
+
+
+def is_tts_configured() -> bool:
+    """Return whether ElevenLabs TTS has the minimum required configuration."""
+    return bool(ELEVENLABS_API_KEY)

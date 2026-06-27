@@ -11,6 +11,21 @@ from types import SimpleNamespace
     "Gemini provider runtime dependencies are not installed",
 )
 class GeminiProviderInteractionsTests(unittest.TestCase):
+    def test_default_text_image_model_order(self):
+        from llm_providers.gemini import GEMINI_TEXT_IMAGE_MODELS
+
+        self.assertEqual(
+            [model for model, _ in GEMINI_TEXT_IMAGE_MODELS],
+            [
+                "gemini-3.5-flash",
+                "gemini-3-flash-preview",
+                "gemini-2.5-pro",
+                "gemini-2.5-flash",
+                "gemini-3.1-flash-lite",
+                "gemini-2.5-flash-lite",
+            ],
+        )
+
     def test_generate_response_uses_interactions_payload_and_usage(self):
         from llm_providers.gemini import GeminiProvider
 

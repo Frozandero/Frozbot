@@ -82,12 +82,7 @@ def setup_misc_commands(tree: app_commands.CommandTree, client: discord.Client):
                 ephemeral=True,
             )
 
-    @tree.command(
-        name="say",
-        description="[Owner Only] Make the bot say something. Use TTS to send only audio.",
-        guild=None,
-    )
-    async def say_command(
+    async def _handle_say_command(
         interaction: discord.Interaction,
         message: str,
         tts: bool = False,
@@ -137,3 +132,27 @@ def setup_misc_commands(tree: app_commands.CommandTree, client: discord.Client):
                     f"❌ **Error**\n\nAn error occurred: {str(e)[:200]}...",
                     ephemeral=True,
                 )
+
+    if config.is_tts_configured():
+        @tree.command(
+            name="say",
+            description="[Owner Only] Make the bot say something. Use TTS to send only audio.",
+            guild=None,
+        )
+        async def say_command(
+            interaction: discord.Interaction,
+            message: str,
+            tts: bool = False,
+        ) -> None:
+            await _handle_say_command(interaction, message, tts)
+    else:
+        @tree.command(
+            name="say",
+            description="[Owner Only] Make the bot say something.",
+            guild=None,
+        )
+        async def say_command(
+            interaction: discord.Interaction,
+            message: str,
+        ) -> None:
+            await _handle_say_command(interaction, message, False)

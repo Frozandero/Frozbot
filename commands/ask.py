@@ -33,14 +33,12 @@ from utils import store_user_question, cleanup_expired_cooldowns
 def setup_ask_commands(tree: app_commands.CommandTree, client: discord.Client):
     """Setup ask-related commands."""
 
-    @tree.command(name="ask", description="Ask the bot a question.", guild=None)
-    async def ask_command(
+    async def _handle_ask_command(
         interaction: discord.Interaction,
         question: str,
         image: Optional[discord.Attachment] = None,
         tts: Optional[bool] = False,
     ) -> None:
-
         if not config.ASK_ENABLE:
             await interaction.response.send_message(
                 "The ask command is disabled.",
@@ -327,3 +325,21 @@ def setup_ask_commands(tree: app_commands.CommandTree, client: discord.Client):
         )
 
         print(f"[QUEUE] Request {request_id} added to queue")
+
+    if config.is_tts_configured():
+        @tree.command(name="ask", description="Ask the bot a question.", guild=None)
+        async def ask_command(
+            interaction: discord.Interaction,
+            question: str,
+            image: Optional[discord.Attachment] = None,
+            tts: Optional[bool] = False,
+        ) -> None:
+            await _handle_ask_command(interaction, question, image, tts)
+    else:
+        @tree.command(name="ask", description="Ask the bot a question.", guild=None)
+        async def ask_command(
+            interaction: discord.Interaction,
+            question: str,
+            image: Optional[discord.Attachment] = None,
+        ) -> None:
+            await _handle_ask_command(interaction, question, image, False)
