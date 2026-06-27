@@ -1,297 +1,125 @@
-# Frozbot - Discord AI Bot
+# Frozbot Agent Guide
 
-## Overview
-Frozbot is a feature-rich Discord bot built with Python that provides AI-powered conversations, image generation, text-to-speech, and entertainment features. It uses Google's Gemini AI for intelligent responses and ElevenLabs for voice synthesis.
+Do not use code formatters unless explicitly instructed.
 
-## Tech Stack
-- **Runtime**: Python 3.10+
-- **Discord Library**: discord.py 2.x
-- **AI/LLM**: Google Gemini (gemini-2.5-pro, gemini-2.5-flash, gemini-2.0-flash with fallback)
-- **TTS**: ElevenLabs API
-- **Database**: SQLite (database.db)
-- **Image Processing**: Pillow (PIL)
-- **Audio Processing**: FFmpeg (for MP3 to OGG conversion)
+## Purpose
 
-## Project Structure
+Frozbot is a personal Discord AI bot written in Python. It supports slash-command and mention-based LLM chat, image generation, ElevenLabs TTS, custom emoji replacement, retry buttons, per-channel memories in SQLite, and owner-only admin commands.
 
-```
-frozbot/
-├── bot.py              # Main entry point - creates client, sets up commands
-├── config.py           # Environment variables and global state
-├── context.py          # Context building functions for AI requests
-├── emoji.py            # Emoji handling (replacement, listing, debug)
-├── handlers.py         # Discord event handlers (on_message, on_interaction, on_ready)
-├── iq.py               # Deterministic IQ calculation functions
-├── request_queue.py    # Request queue system for AI processing
-├── retry.py            # Retry media/context persistence
-├── utils.py            # Utility functions (profanity filter, cooldowns)
-├── views.py            # Discord UI views (pagination)
-├── commands/           # Modular command definitions
-│   ├── __init__.py     # Command setup orchestration
-│   ├── admin.py        # Owner-only admin commands
-│   ├── ask.py          # /ask command
-│   ├── imagine.py      # /imagine command
-│   ├── memory.py       # Memory management commands
-│   └── misc.py         # Miscellaneous commands (/iq, /queue, /say)
-├── database.py         # SQLite database operations
-├── llm.py              # Gemini API integration with model fallback
-├── eleven.py           # ElevenLabs TTS integration
-├── database.db         # SQLite database file
-├── config.env.example  # Example environment configuration
-├── requirements.txt    # Python dependencies
-├── deploy.sh           # Deployment script
-├── frozbot.service     # Systemd service file for Linux deployment
-└── venv/               # Virtual environment
-```
+This file is the primary orientation document for future coding agents. Keep it accurate when changing architecture, commands, environment variables, or operational workflows.
 
-## Key Features
+## Quick Start For Agents
 
-### 1. AI Chat (`/ask`)
-- Context-aware responses using Gemini AI
-- Supports text questions with optional image attachments
-- Optional TTS (text-to-speech) for audio responses
-- Rich context injection including:
-  - Server information and memories
-  - User details (roles, join date, recent messages)
-  - Mentioned users' information and messages
-  - Channel context (recent messages, LLM-generated summary)
-  - Guild custom emojis (auto-replaced in responses)
-- Rate limiting (configurable cooldown, TTS has 5x longer cooldown)
-- Request queue system with retry functionality
-- Model fallback: tries multiple Gemini models if quota exceeded
+1. Check current state with `git status --short`.
+2. Read this file, then inspect the specific modules you will touch.
+3. Do not read `.env`, `database.db`, `venv/`, `.venv/`, `temp_media/`, or generated caches unless the task explicitly requires it.
+4. Avoid live Discord, Gemini, xAI, ElevenLabs, or FFmpeg calls unless the user asks for integration testing.
+5. Prefer small, local verification:
+   - `python -m compileall -q .`
+   - `python -m unittest discover -s tests`
+   - For full dependency coverage, run these inside an activated environment after `pip install -r requirements.txt`.
+6. If you change commands or runtime behavior, update `README.md`, `config.env.example`, and this file when relevant.
 
-### 2. Image Generation (`/imagine`)
-- Text-to-image and image-to-image generation
-- Uses `gemini-2.0-flash-preview-image-generation` model
-- Supports user mentions (fetches profile pictures as reference)
-- Rate limited (configurable cooldown)
+## Runtime
 
-### 3. IQ Command (`/iq`)
-- Deterministic, fake IQ calculation for entertainment
-- Uses SHA-256 hash of stable user identifiers
-- Normal distribution (mean: 100, stddev: 15)
+- Python 3.10+
+- `discord.py` for Discord client, app commands, messages, views, and interactions
+- Provider-based LLM layer under `llm_providers/`
+- SQLite file storage through `database.py`
+- Pillow for image inputs and generated image handling
+- ElevenLabs for TTS, plus an external `ffmpeg` executable for MP3 to OGG/Opus conversion
 
-### 4. Memory System
-- Persistent memories stored in SQLite
-- Supports per-user memories and generic server memories (username='*')
-- Channel-scoped memories
-- Pagination support for viewing memories
-- Commands: `/setmemory`, `/getmemory`, `/deletememory` (owner-only for set/delete)
+Required environment:
 
-### 5. Channel Context
-- **Raw Context**: Last N messages from the channel
-- **Summary**: LLM-generated summary of recent conversation (cached with TTL)
-- Configurable depth and caching
+- `DISCORD_BOT_TOKEN`
+- `OWNER_ID`
+- `GEMINI_API_KEY` when `LLM_PROVIDER=gemini`
+- `XAI_API_KEY` when `LLM_PROVIDER=xai`
 
-## Slash Commands
+Important optional environment:
 
-### User Commands
-| Command | Description |
-|---------|-------------|
-| `/ask <question> [image] [tts]` | Ask the AI a question (optional image/TTS) |
-| `/imagine <prompt> [image]` | Generate an image from text/image |
-| `/iq [user]` | Get deterministic IQ for user |
-| `/queue` | Check request queue status |
-| `/getmemory [user] [limit]` | View stored memories |
+- `DISCORD_GUILD_ID` for guild-scoped command sync
+- `DEV_SERVER_ID` for dev-only admin commands
+- `LLM_PROVIDER`, currently `gemini` or `xai`
+- `ELEVENLABS_API_KEY` and `ELEVENLABS_VOICE_ID`
+- `ASK_ENABLE`, `IMAGINE_ENABLE`, `REQUIRE_EXPLICIT_MENTION`
+- cooldown, context-depth, and channel-summary variables in `config.env.example`
 
-### Owner Commands
-| Command | Description |
-|---------|-------------|
-| `/setmemory <memory> [user]` | Store a memory |
-| `/deletememory <id>` | Delete a memory |
-| `/clearqueue` | Clear the request queue |
-| `/togglellmban <user>` | Ban/unban user from AI features |
-| `/config` | View current bot configuration |
-| `/sethistorylimit [number]` | Set messages per user (1-50) |
-| `/setsearchdepth [number]` | Set channel search depth (100-10000) |
-| `/setimagineenabled [bool]` | Toggle image generation |
-| `/setask [bool]` | Toggle ask command |
-| `/setcontextincludebots [bool]` | Include bot messages in context |
-| `/debugemojis` | Debug emoji replacement issues |
-| `/refresh` | Refresh slash commands (dev server only) |
+## Architecture Map
 
-## Environment Variables
+- `bot.py`: Creates the Discord client, command tree, database tables, commands, handlers, and runs the bot.
+- `config.py`: Loads environment variables and owns mutable runtime state such as cooldowns, retry caches, channel-summary cache, and the request queue.
+- `commands/`: Registers slash commands by feature area.
+  - `ask.py`: `/ask`, context assembly for slash commands, optional image and TTS.
+  - `imagine.py`: `/imagine`, image generation, optional prompt reference images and mentioned-user avatars.
+  - `memory.py`: `/setmemory`, `/getmemory`, `/deletememory`.
+  - `admin.py`: owner-only settings, queue/cache controls, bans, refresh, emoji debug.
+  - `misc.py`: `/iq`, `/queue`, `/say`.
+- `handlers.py`: Discord events, retry-button interactions, mention-based chat, command sync on ready.
+- `context.py`: Shared context construction for recent messages, channel summaries, user/member info, replied-message context, memories, and final system prompt.
+- `request_queue.py`: FIFO async request processing for ask/retry requests and response delivery.
+- `llm.py`: Compatibility facade around the provider system. Some function names still say Gemini; do not treat that as provider-specific behavior.
+- `llm_providers/`: Provider abstraction and concrete Gemini/xAI implementations.
+- `emoji.py`: Guild custom emoji discovery, replacement, and debug output.
+- `eleven.py`: ElevenLabs TTS and FFmpeg conversion.
+- `retry.py`: In-memory retry context plus temporary persisted image files.
+- `database.py`: Synchronous SQLite helpers for bans and memories.
+- `views.py`: Discord UI views, currently memory pagination.
+- `iq.py`: Pure deterministic entertainment IQ calculation.
 
-### Required
-```env
-DISCORD_BOT_TOKEN=your-bot-token
-OWNER_ID=your-discord-user-id
-GEMINI_API_KEY=your-gemini-api-key
+## Coding Rules
+
+- Preserve the provider abstraction. New LLM backends should implement `LLMProvider`, be wired in `llm_providers/__init__.py`, and expose config in `config.env.example`.
+- Keep slash-command `/ask` and mention-based chat behavior aligned. If you change context assembly in `commands/ask.py`, check whether `_build_message_context()` in `handlers.py` needs the same change.
+- Always defer Discord interactions before long work such as history reads, LLM calls, image processing, TTS, or network fetches.
+- Never call blocking SDK/network work directly on the event loop. Existing provider code uses executors around blocking clients.
+- Keep user-visible Discord messages within the 2000-character limit or use attachments/files when appropriate.
+- Keep owner-only commands guarded with `config.is_owner()`.
+- Keep memory behavior channel-scoped unless intentionally changing the data model.
+- Avoid adding persistent state to globals unless it belongs in `config.py` and has a clear lifecycle.
+- Do not commit secrets, local databases, virtual environments, generated media, or generated agent artifacts.
+- Do not run the bot with `python bot.py` as a verification step unless the user explicitly wants a live run.
+
+## Testing Guidance
+
+There is no full integration test harness for Discord/API behavior. Favor pure unit tests for deterministic helpers and mock/fake objects for Discord-facing code.
+
+Create or refresh a local environment when dependencies are missing:
+
+```powershell
+py -3 -m venv .venv
+.\.venv\Scripts\Activate.ps1
+python -m pip install -r requirements.txt
 ```
 
-### Optional
-```env
-# Guild/Server Configuration
-DISCORD_GUILD_ID=guild-id          # For instant command sync (dev)
-DEV_SERVER_ID=dev-server-id        # For dev-only commands
+Recommended checks after edits:
 
-# TTS Configuration
-ELEVENLABS_API_KEY=your-key        # Required for TTS
-ELEVENLABS_VOICE_ID=voice-id       # Default: JBFqnCBsd6RMkjVDRZzb
-
-# Feature Toggles
-CENSOR_MESSAGES=false              # Enable profanity filter
-ASK_ENABLE=true                    # Enable /ask command
-IMAGINE_ENABLE=true                # Enable /imagine command
-
-# Rate Limiting
-ASK_COMMAND_COOLDOWN_MINUTES=30
-IMAGINE_COMMAND_COOLDOWN_MINUTES=15
-RETRY_BUTTON_EXPIRE_MINUTES=5
-
-# Message History
-MESSAGE_HISTORY_LIMIT=10           # Messages per user (1-50)
-MESSAGE_HISTORY_SEARCH_DEPTH=10000 # Channel search depth
-
-# Channel Context
-CHANNEL_CONTEXT_LAST=10            # Raw context messages
-CHANNEL_CONTEXT_INCLUDE_BOT_MESSAGES=false
-CHANNEL_SUMMARY_ENABLE=true        # LLM summary generation
-CHANNEL_SUMMARY_DEPTH=50           # Messages for summary
-CHANNEL_SUMMARY_TTL_MIN=3          # Summary cache duration
+```powershell
+python -m compileall -q .
+python -m unittest discover -s tests
 ```
 
-## Architecture Details
+Some tests may skip in a bare interpreter when runtime dependencies are not installed. A clean run in an activated dependency environment is stronger than a bare-interpreter smoke run.
 
-### Modular Organization
-The codebase is organized into logical modules:
-- **config.py**: Centralized configuration and global state management
-- **context.py**: All context building functions for AI requests
-- **emoji.py**: Guild emoji handling and replacement
-- **handlers.py**: Discord event handlers (on_ready, on_message, on_interaction)
-- **request_queue.py**: Async queue for processing AI requests
-- **retry.py**: Media and context persistence for retry functionality
-- **utils.py**: Shared utility functions
-- **views.py**: Discord UI components (pagination views)
-- **commands/**: Slash command definitions split by category
+When adding tests:
 
-### Request Queue System
-- Asynchronous queue for handling AI requests
-- Prevents rate limiting and ensures orderly processing
-- Priority system (owner > retry > regular)
-- 2-second delay between requests
-- Retry functionality with one-time buttons
+- Use `unittest` unless the project explicitly adopts another test runner.
+- Do not require API keys, `.env`, Discord connections, FFmpeg, or network access.
+- Prefer tiny fake objects over importing or constructing live Discord models.
 
-### LLM Integration (`llm.py`)
-- Model fallback chain: gemini-2.5-pro → gemini-2.5-flash → gemini-2.5-flash-lite → gemini-2.0-flash → gemini-2.0-flash-lite
-- Configurable thinking budgets per model
-- URL context tool support for web-aware responses
-- Automatic retry on server errors (500, 502, 503, 504)
-- 30-second timeout per request
-- Separate function for message summarization
+## Known Technical Debt
 
-### TTS System (`eleven.py`)
-- ElevenLabs API integration
-- Markdown stripping for clean TTS output
-- Discord emote name extraction (`:emote:` → "emote")
-- MP3 to OGG/Opus conversion via FFmpeg (48kHz, 32kbps)
+- `request_queue.py` stores a `priority` field, but the queue is a plain FIFO `asyncio.Queue`; priority is currently informational.
+- Several compatibility names still say Gemini (`get_gemini_client`, `try_gemini_models`, `summarize_messages_with_gemini`) even though the provider layer can use xAI.
+- `database.py` receives `channel_id` in some count/delete helpers but not every query currently scopes by it.
+- Retry buttons depend on in-memory state and temporary files, so retries do not survive process restarts.
+- `eleven.get_eleven_client()` raises when the API key is missing; callers should handle that path carefully.
+- LLM provider model names and SDK behavior can drift over time. Verify provider changes against official provider docs before changing model IDs or request shapes.
 
-### Database Schema (`database.py`)
-```sql
--- Banned users table
-CREATE TABLE banned_users (
-    user_id INTEGER PRIMARY KEY
-);
+## Operational Notes
 
--- Memories table
-CREATE TABLE memories (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    username TEXT,          -- User's name or '*' for generic
-    memory TEXT,
-    channel_id INTEGER,
-    created_at DATETIME DEFAULT CURRENT_TIMESTAMP
-);
-```
-
-### Context Building
-The bot builds rich context for each `/ask` request:
-1. **Server Context**: Server name + generic memories
-2. **User Context**: Name, username, roles, join date, recent messages, user-specific memories
-3. **Mentioned Users**: Full details for any @mentioned users
-4. **Channel Context**: Recent raw messages + optional LLM summary
-5. **Emoji Context**: List of available guild emojis
-6. **Date/Time**: Current timestamp
-
-### Emoji Handling
-- Detects `:emoji_name:` patterns in AI responses
-- Looks up guild custom emojis by name
-- Auto-replaces with proper Discord emoji format
-- Fetches from API if not in cache
-
-## Discord Intents Required
-- `message_content` - For AI context
-- `members` - For user information
-- `guilds` - For server information
-
-## Running the Bot
-
-### Development
-```bash
-# Create virtual environment
-python -m venv venv
-
-# Activate (Windows PowerShell)
-.\venv\Scripts\Activate.ps1
-
-# Activate (Linux/macOS)
-source venv/bin/activate
-
-# Install dependencies
-pip install -r requirements.txt
-
-# Copy and configure environment
-cp config.env.example .env
-# Edit .env with your tokens
-
-# Run
-python bot.py
-```
-
-### Production (Linux with systemd)
-Use `frozbot.service` and `deploy.sh` for systemd-based deployment.
-
-## Important Code Patterns
-
-### Rate Limiting
-```python
-# Cooldown tracking
-ASK_COMMAND_COOLDOWNS: Dict[int, datetime.datetime] = {}
-
-# Check and apply cooldown
-if user_id in ASK_COMMAND_COOLDOWNS:
-    time_diff = current_time - ASK_COMMAND_COOLDOWNS[user_id]
-    if time_diff.total_seconds() / 60 < cooldown_minutes:
-        # Rate limited
-```
-
-### Request Queue
-```python
-# Add to queue
-await add_request_to_queue(
-    RequestType.ASK,
-    interaction,
-    question,
-    context_string,
-    user_id,
-    priority=1,  # Owner priority
-    media_parts=media_parts,
-    tts=tts,
-)
-```
-
-### Deferred Response
-```python
-# For long-running operations
-await interaction.response.defer(thinking=True)
-# ... do work ...
-await interaction.followup.send(content=response)
-```
-
-## Known Considerations
-- TTS cooldown is 5x the ask cooldown to manage API costs
-- Channel summary is cached to reduce LLM calls
-- Retry buttons expire after configurable minutes
-- Bot messages are excluded from context by default
-- Model fallback ensures availability but may vary quality
-- Large channel histories impact response time
+- Slash command sync happens in `handlers.on_ready()`. `DISCORD_GUILD_ID` gives fast guild sync; otherwise global sync can take up to an hour.
+- `DEV_SERVER_ID` controls dev-only command registration via `config.IS_DEV_SERVER_COMMAND`.
+- `database.db` is local runtime data and is intentionally ignored by git.
+- `temp_media/` is runtime retry media and should remain ignored.
 

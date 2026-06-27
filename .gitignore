@@ -5,3 +5,11 @@ venv/
 env.example
 database.db
 __pycache__/
+*.pyc
+temp_media/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+*.log
