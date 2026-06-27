@@ -138,7 +138,7 @@ case "$1" in
         FROZBOT_SERVICE_USER="$BOOTSTRAP_USER" \
         FROZBOT_VENV_DIR="$BOOTSTRAP_DIR/.venv" \
         FROZBOT_PYTHON="$BOOTSTRAP_DIR/.venv/bin/python" \
-            "$BOOTSTRAP_DIR/deploy.sh" install
+            bash "$BOOTSTRAP_DIR/deploy.sh" install
 
         systemctl enable --now "$SERVICE_NAME"
         echo "FrozBot bootstrapped and started."

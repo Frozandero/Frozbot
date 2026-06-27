@@ -37,20 +37,17 @@ OWNER_ID=your_discord_user_id
 
 ### 4. Bootstrap the Service
 ```bash
-# Make deploy script executable
-chmod +x deploy.sh
-
 # Create the frozbot system user, install to /opt/frozbot, create the venv,
 # install dependencies, register the service, and start it.
-sudo ./deploy.sh bootstrap
+sudo bash deploy.sh bootstrap
 ```
 
 The bootstrap command creates a dedicated `frozbot` system user and copies the app to `/opt/frozbot`. This is recommended when the repo was cloned under `/root`, because non-root service users cannot normally read files inside `/root`.
 
 Optional bootstrap overrides:
 ```bash
-sudo FROZBOT_BOOTSTRAP_USER=mybot ./deploy.sh bootstrap
-sudo FROZBOT_BOOTSTRAP_DIR=/srv/frozbot ./deploy.sh bootstrap
+sudo FROZBOT_BOOTSTRAP_USER=mybot bash deploy.sh bootstrap
+sudo FROZBOT_BOOTSTRAP_DIR=/srv/frozbot bash deploy.sh bootstrap
 ```
 
 ### 5. Manual Service Install
@@ -60,44 +57,44 @@ python3 -m venv .venv
 source .venv/bin/activate
 pip install -r requirements.txt
 
-./deploy.sh install
-./deploy.sh start
+bash deploy.sh install
+bash deploy.sh start
 ```
 
 The install command generates `/etc/systemd/system/frozbot.service` using the current checkout path and current Unix user. It auto-detects Python from `.venv`, `venv`, or `env` under the repo, then falls back to `python3`/`python` on `PATH`.
 
 Optional overrides:
 ```bash
-FROZBOT_SERVICE_USER=frozbot ./deploy.sh install
-FROZBOT_VENV_DIR=/opt/frozbot/.venv ./deploy.sh install
-FROZBOT_PYTHON=/opt/frozbot/.venv/bin/python ./deploy.sh install
+FROZBOT_SERVICE_USER=frozbot bash deploy.sh install
+FROZBOT_VENV_DIR=/opt/frozbot/.venv bash deploy.sh install
+FROZBOT_PYTHON=/opt/frozbot/.venv/bin/python bash deploy.sh install
 ```
 
 ### 6. Manage the Bot
 ```bash
 # Start the bot service if using manual install
-./deploy.sh start
+bash deploy.sh start
 
 # Check status
-./deploy.sh status
+bash deploy.sh status
 
 # View logs
-./deploy.sh logs
+bash deploy.sh logs
 ```
 
 ## Managing Your Bot
 
 ### Start/Stop/Restart
 ```bash
-./deploy.sh start    # Start the bot
-./deploy.sh stop     # Stop the bot
-./deploy.sh restart  # Restart the bot
+bash deploy.sh start    # Start the bot
+bash deploy.sh stop     # Stop the bot
+bash deploy.sh restart  # Restart the bot
 ```
 
 ### View Status and Logs
 ```bash
-./deploy.sh status   # Check if bot is running
-./deploy.sh logs     # View real-time logs
+bash deploy.sh status   # Check if bot is running
+bash deploy.sh logs     # View real-time logs
 ```
 
 ### Refresh Commands (No Restart Needed!)
@@ -105,17 +102,17 @@ After making changes to your bot code:
 
 1. **Upload the updated files** to your VPS
 2. **Use the `/refresh` command** in Discord (only you can use this)
-3. **Or restart the service**: `./deploy.sh restart`
+3. **Or restart the service**: `bash deploy.sh restart`
 
 ## Troubleshooting
 
 ### Bot Won't Start
 ```bash
 # Check service status
-./deploy.sh status
+bash deploy.sh status
 
 # View detailed logs
-./deploy.sh logs
+bash deploy.sh logs
 
 # Check if paths are correct in service file
 sudo nano /etc/systemd/system/frozbot.service
@@ -123,14 +120,11 @@ sudo nano /etc/systemd/system/frozbot.service
 
 ### Commands Not Updating
 - Use `/refresh` in Discord (you only)
-- Or restart: `./deploy.sh restart`
+- Or restart: `bash deploy.sh restart`
 - Check that `OWNER_ID` is set correctly in `.env`
 
 ### Permission Issues
 ```bash
-# Make sure deploy script is executable
-chmod +x deploy.sh
-
 # Check file ownership
 ls -la
 ```
