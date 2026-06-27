@@ -1,6 +1,7 @@
 """Event handlers for Frozbot."""
 
 import datetime
+import hashlib
 import io
 import re
 from typing import Optional
@@ -25,14 +26,47 @@ from context import (
 )
 from database import is_banned
 from emoji import list_guild_emoji_names
-from llm import get_gemini_client
+from llm import get_llm_client
 from request_queue import (
     RequestType,
     add_request_to_queue,
     add_message_request_to_queue,
 )
-from retry import load_retry_context, load_retry_media
+from retry import (
+    cleanup_expired_retry_records,
+    cleanup_retry_record,
+    load_retry_context,
+    load_retry_media,
+    load_retry_record,
+)
 from utils import filter_profanity
+
+
+def _stable_question_hash(question: str) -> str:
+    return hashlib.sha256(question.encode("utf-8")).hexdigest()[:12]
+
+
+def _question_matches_retry_hash(question: str, question_hash: str) -> bool:
+    legacy_hash = str(hash(question) % 1000000)
+    return question_hash in {_stable_question_hash(question), legacy_hash}
+
+
+async def _disable_retry_button_message(
+    interaction: discord.Interaction, custom_id: str
+) -> None:
+    try:
+        disable_view = discord.ui.View()
+        disable_view.add_item(
+            discord.ui.Button(
+                style=discord.ButtonStyle.primary,
+                label="🔄 Retry",
+                custom_id=custom_id,
+                disabled=True,
+            )
+        )
+        await interaction.message.edit(view=disable_view)
+    except Exception:
+        pass
 
 
 def setup_handlers(client: discord.Client, tree: discord.app_commands.CommandTree):
@@ -96,8 +130,8 @@ def setup_handlers(client: discord.Client, tree: discord.app_commands.CommandTre
             return
 
         # Check if LLM provider is configured
-        gemini_client = get_gemini_client()
-        if not gemini_client:
+        llm_client = get_llm_client()
+        if not llm_client:
             return
 
         # Rate limiting check (owner bypass)
@@ -174,6 +208,11 @@ def setup_handlers(client: discord.Client, tree: discord.app_commands.CommandTre
         """Handle bot ready event."""
         print(f"Logged in as {client.user} (ID: {client.user.id})")
         print("Bot is ready! Starting command sync...")
+        removed_retry_records = cleanup_expired_retry_records(
+            config.RETRY_BUTTON_EXPIRE_MINUTES * 60
+        )
+        if removed_retry_records:
+            print(f"[CLEANUP] Removed {removed_retry_records} expired retry records")
 
         # Remove disabled commands
         if not config.IMAGINE_ENABLE:
@@ -221,121 +260,105 @@ async def _handle_retry_button(
 
         # Parse the custom_id
         parts = custom_id.split("_")
-        if len(parts) >= 3:
-            button_user_id = int(parts[1])
-            question_hash = parts[2]
-            created_ts = None
-            if len(parts) >= 5:
-                try:
-                    created_ts = int(parts[4])
-                except ValueError:
-                    created_ts = None
+        if len(parts) < 3:
+            await interaction.response.send_message(
+                "❌ An error occurred while processing the retry button.",
+                ephemeral=True,
+            )
+            return
 
-            # Check if the button was pressed by the original user
-            if interaction.user.id != button_user_id:
+        button_user_id = int(parts[1])
+        question_hash = parts[2]
+        created_ts = None
+        if len(parts) >= 5:
+            try:
+                created_ts = int(parts[4])
+            except ValueError:
+                created_ts = None
+
+        # Check if the button was pressed by the original user
+        if interaction.user.id != button_user_id:
+            await interaction.response.send_message(
+                "❌ Only the person who asked the original question can use the retry button.",
+                ephemeral=True,
+            )
+            return
+
+        # Check expiry before consuming a one-time retry record.
+        if created_ts is not None:
+            age_seconds = int(datetime.datetime.now().timestamp()) - created_ts
+            if age_seconds >= config.RETRY_BUTTON_EXPIRE_MINUTES * 60:
+                await _disable_retry_button_message(interaction, custom_id)
+                cleanup_retry_record(custom_id)
                 await interaction.response.send_message(
-                    "❌ Only the person who asked the original question can use the retry button.",
+                    "⏰ This retry button has expired.",
                     ephemeral=True,
                 )
                 return
 
-            # Find the question by hash
+        retry_record = load_retry_record(custom_id)
+        if retry_record:
+            question = str(retry_record.get("question", ""))
+            loaded_context = str(retry_record.get("context_string", ""))
+            tts = bool(retry_record.get("tts", False))
+            retry_media_parts = retry_record.get("media_parts")
+        else:
+            question = ""
+            loaded_context = ""
+            tts = False
+            retry_media_parts = None
+
+            # Compatibility fallback for retry buttons created before retry
+            # records were introduced and still living in the current process.
             if button_user_id in config.RECENT_QUESTIONS:
                 for question_data in config.RECENT_QUESTIONS[button_user_id]:
                     if len(question_data) >= 3:
-                        question, tts, image = question_data
+                        candidate_question, candidate_tts, _image = question_data
                     elif len(question_data) == 2:
-                        question, tts = question_data
-                        image = None
+                        candidate_question, candidate_tts = question_data
                     else:
-                        question = question_data[0] if question_data else ""
-                        tts = False
-                        image = None
+                        candidate_question = question_data[0] if question_data else ""
+                        candidate_tts = False
 
-                    if str(hash(question) % 1000000) == question_hash:
-                        # Load original context
+                    if _question_matches_retry_hash(candidate_question, question_hash):
+                        question = candidate_question
                         loaded_context = load_retry_context(custom_id) or ""
-
-                        # Check expiry
-                        if created_ts is not None:
-                            age_seconds = (
-                                int(datetime.datetime.now().timestamp()) - created_ts
-                            )
-                            if age_seconds >= config.RETRY_BUTTON_EXPIRE_MINUTES * 60:
-                                try:
-                                    disable_view = discord.ui.View()
-                                    disable_view.add_item(
-                                        discord.ui.Button(
-                                            style=discord.ButtonStyle.primary,
-                                            label="🔄 Retry",
-                                            custom_id=custom_id,
-                                            disabled=True,
-                                        )
-                                    )
-                                    await interaction.message.edit(view=disable_view)
-                                except Exception:
-                                    pass
-                                await interaction.response.send_message(
-                                    "⏰ This retry button has expired.",
-                                    ephemeral=True,
-                                )
-                                return
-
-                        # Mark as used and disable button
-                        config.USED_RETRY_BUTTONS[custom_id] = datetime.datetime.now()
-                        try:
-                            disable_view = discord.ui.View()
-                            disable_view.add_item(
-                                discord.ui.Button(
-                                    style=discord.ButtonStyle.primary,
-                                    label="🔄 Retry",
-                                    custom_id=custom_id,
-                                    disabled=True,
-                                )
-                            )
-                            await interaction.message.edit(view=disable_view)
-                        except Exception:
-                            pass
-
-                        # Load media
+                        tts = bool(candidate_tts)
                         retry_media_parts = load_retry_media(custom_id)
+                        break
 
-                        # Add retry request to queue
-                        from request_queue import RequestType, add_request_to_queue
+        if not question:
+            await interaction.response.send_message(
+                "❌ The original question is no longer available for retry.",
+                ephemeral=True,
+            )
+            return
 
-                        request_id = await add_request_to_queue(
-                            RequestType.RETRY,
-                            interaction,
-                            question,
-                            loaded_context if loaded_context else "",
-                            button_user_id,
-                            priority=2,
-                            media_parts=retry_media_parts,
-                            tts=tts,
-                        )
+        # Mark as used and disable button.
+        config.USED_RETRY_BUTTONS[custom_id] = datetime.datetime.now()
+        await _disable_retry_button_message(interaction, custom_id)
 
-                        # Send confirmation
-                        queue_position = config.REQUEST_QUEUE.qsize()
-                        filtered_question = filter_profanity(question)
-                        await interaction.response.send_message(
-                            f"🔄 **Retry queued**\n\n"
-                            f"**Question:** {filtered_question}\n\n"
-                            f"Your retry request has been added to the queue (position: {queue_position}). "
-                            f"It will be processed shortly.",
-                            ephemeral=True,
-                        )
-                        return
+        request_id = await add_request_to_queue(
+            RequestType.RETRY,
+            interaction,
+            question,
+            loaded_context if loaded_context else "",
+            button_user_id,
+            priority=2,
+            media_parts=retry_media_parts,
+            tts=tts,
+        )
 
-                # Question not found
-                await interaction.response.send_message(
-                    "❌ The original question is no longer available for retry.",
-                    ephemeral=True,
-                )
-            else:
-                await interaction.response.send_message(
-                    "❌ No recent questions found to retry.",
-                    ephemeral=True,
-                )
+        queue_size = config.REQUEST_QUEUE.qsize()
+        filtered_question = filter_profanity(question)
+        await interaction.response.send_message(
+            f"🔄 **Retry queued**\n\n"
+            f"**Question:** {filtered_question}\n\n"
+            f"Your retry request has been added to the queue. "
+            f"There are currently {queue_size} request(s) waiting.",
+            ephemeral=True,
+        )
+        print(f"[QUEUE] Retry request {request_id} added to queue")
 
     except (ValueError, IndexError) as e:
         print(f"Error parsing retry button custom_id: {e}")

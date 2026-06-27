@@ -1,6 +1,7 @@
 import os
 import re
 import subprocess
+from typing import Optional
 
 from elevenlabs import ElevenLabs
 from markdown_it import MarkdownIt
@@ -10,13 +11,17 @@ ELEVEN_CLIENT = None
 VOICE_ID = None
 
 
-def get_eleven_client():
+def get_eleven_client() -> Optional[ElevenLabs]:
     global ELEVEN_CLIENT
     if not ELEVEN_CLIENT:
-        if os.getenv("ELEVENLABS_API_KEY"):
-            ELEVEN_CLIENT = ElevenLabs(api_key=os.getenv("ELEVENLABS_API_KEY"))
-        else:
-            raise Exception("ElevenLabs API key not found")
+        api_key = os.getenv("ELEVENLABS_API_KEY")
+        if not api_key:
+            return None
+        try:
+            ELEVEN_CLIENT = ElevenLabs(api_key=api_key)
+        except Exception as e:
+            print(f"Error initializing ElevenLabs client: {e}")
+            return None
     return ELEVEN_CLIENT
 
 
@@ -32,6 +37,9 @@ def get_voice_id() -> str:
 def generate_tts(text: str) -> bytes:
     try:
         client = get_eleven_client()
+        if not client:
+            print("ElevenLabs API key not configured")
+            return b""
         tts_bytes = client.text_to_speech.convert(
             text=cleanup_text_for_tts(text),
             voice_id=get_voice_id(),

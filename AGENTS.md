@@ -57,13 +57,13 @@ Important optional environment:
   - `misc.py`: `/iq`, `/queue`, `/say`.
 - `handlers.py`: Discord events, retry-button interactions, mention-based chat, command sync on ready.
 - `context.py`: Shared context construction for recent messages, channel summaries, user/member info, replied-message context, memories, and final system prompt.
-- `request_queue.py`: FIFO async request processing for ask/retry requests and response delivery.
-- `llm.py`: Compatibility facade around the provider system. Some function names still say Gemini; do not treat that as provider-specific behavior.
+- `request_queue.py`: Priority-aware async request processing for ask/retry requests and response delivery.
+- `llm.py`: Provider-neutral facade around the provider system.
 - `llm_providers/`: Provider abstraction and concrete Gemini/xAI implementations.
 - `emoji.py`: Guild custom emoji discovery, replacement, and debug output.
 - `eleven.py`: ElevenLabs TTS and FFmpeg conversion.
-- `retry.py`: In-memory retry context plus temporary persisted image files.
-- `database.py`: Synchronous SQLite helpers for bans and memories.
+- `retry.py`: Persistent retry records plus temporary persisted image files for retry buttons.
+- `database.py`: Synchronous SQLite helpers for bans and channel-scoped memories.
 - `views.py`: Discord UI views, currently memory pagination.
 - `iq.py`: Pure deterministic entertainment IQ calculation.
 
@@ -109,11 +109,6 @@ When adding tests:
 
 ## Known Technical Debt
 
-- `request_queue.py` stores a `priority` field, but the queue is a plain FIFO `asyncio.Queue`; priority is currently informational.
-- Several compatibility names still say Gemini (`get_gemini_client`, `try_gemini_models`, `summarize_messages_with_gemini`) even though the provider layer can use xAI.
-- `database.py` receives `channel_id` in some count/delete helpers but not every query currently scopes by it.
-- Retry buttons depend on in-memory state and temporary files, so retries do not survive process restarts.
-- `eleven.get_eleven_client()` raises when the API key is missing; callers should handle that path carefully.
 - LLM provider model names and SDK behavior can drift over time. Verify provider changes against official provider docs before changing model IDs or request shapes.
 
 ## Operational Notes

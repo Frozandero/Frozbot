@@ -130,7 +130,10 @@ def get_memories(
 def count_memories_by_user(username: str, channel_id: int) -> int:
     conn = sqlite3.connect("database.db")
     c = conn.cursor()
-    c.execute("SELECT COUNT(*) FROM memories WHERE username = ?", (username,))
+    c.execute(
+        "SELECT COUNT(*) FROM memories WHERE username = ? AND channel_id = ?",
+        (username, channel_id),
+    )
     result = c.fetchone()
     conn.close()
     return result[0] if result else 0
@@ -139,18 +142,20 @@ def count_memories_by_user(username: str, channel_id: int) -> int:
 def count_memories(channel_id: int) -> int:
     conn = sqlite3.connect("database.db")
     c = conn.cursor()
-    c.execute("SELECT COUNT(*) FROM memories")
+    c.execute("SELECT COUNT(*) FROM memories WHERE channel_id = ?", (channel_id,))
     result = c.fetchone()
     conn.close()
     return result[0] if result else 0
 
 
-def delete_memory(id: int, channel_id: int):
+def delete_memory(id: int, channel_id: int) -> bool:
     conn = sqlite3.connect("database.db")
     c = conn.cursor()
-    c.execute("DELETE FROM memories WHERE id = ?", (id,))
+    c.execute("DELETE FROM memories WHERE id = ? AND channel_id = ?", (id, channel_id))
+    deleted = c.rowcount > 0
     conn.commit()
     conn.close()
+    return deleted
 
 
 def get_memories_for_users(

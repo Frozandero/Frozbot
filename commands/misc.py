@@ -8,7 +8,7 @@ from discord import app_commands
 
 import config
 from iq import compute_deterministic_iq
-from eleven import generate_tts
+from eleven import generate_tts, get_eleven_client
 
 
 def setup_misc_commands(tree: app_commands.CommandTree, client: discord.Client):
@@ -103,9 +103,7 @@ def setup_misc_commands(tree: app_commands.CommandTree, client: discord.Client):
 
             if tts:
                 # Check if ElevenLabs is configured
-                import os
-
-                if not os.getenv("ELEVENLABS_API_KEY"):
+                if not get_eleven_client():
                     await interaction.response.send_message(
                         "❌ **TTS Unavailable**\n\nElevenLabs API key not configured.",
                         ephemeral=True,

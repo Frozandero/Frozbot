@@ -2,6 +2,7 @@
 
 import asyncio
 import datetime
+import hashlib
 import io
 import uuid
 from dataclasses import dataclass
@@ -15,13 +16,10 @@ import config
 from utils import filter_profanity
 from emoji import replace_guild_emojis_in_text
 from retry import (
-    save_retry_media,
-    save_retry_context,
-    cleanup_retry_media,
-    load_retry_media,
-    load_retry_context,
+    cleanup_retry_record,
+    save_retry_record,
 )
-from llm import try_gemini_models
+from llm import generate_response_with_llm
 from eleven import generate_tts
 
 
@@ -49,6 +47,19 @@ class QueuedRequest:
     message: Optional[discord.Message] = None  # For message-based requests (mentions)
 
 
+def _build_queue_item(request: QueuedRequest) -> tuple[int, int, QueuedRequest]:
+    """Build an asyncio.PriorityQueue item for a request."""
+    sequence = next(config.REQUEST_QUEUE_SEQUENCE)
+    return (-request.priority, sequence, request)
+
+
+def _unpack_queue_item(item) -> QueuedRequest:
+    """Return the QueuedRequest from current or legacy queue item shapes."""
+    if isinstance(item, tuple) and len(item) == 3:
+        return item[2]
+    return item
+
+
 async def process_request_queue() -> None:
     """Process requests from the queue sequentially with delays."""
     if config.QUEUE_PROCESSOR_RUNNING:
@@ -59,21 +70,24 @@ async def process_request_queue() -> None:
 
     try:
         while True:
+            queue_item = None
             try:
                 # Get next request from queue
-                request: QueuedRequest = await config.REQUEST_QUEUE.get()
-                print(
-                    f"[PROCESS] Processing request {request.request_id} ({request.request_type.value}) from user {request.user_id}"
-                )
+                queue_item = await config.REQUEST_QUEUE.get()
+                try:
+                    request = _unpack_queue_item(queue_item)
+                    print(
+                        f"[PROCESS] Processing request {request.request_id} ({request.request_type.value}, priority {request.priority}) from user {request.user_id}"
+                    )
 
-                # Process the request
-                if request.request_type == RequestType.ASK:
-                    await process_ask_request(request)
-                elif request.request_type == RequestType.RETRY:
-                    await process_retry_request(request)
-
-                # Mark as done
-                config.REQUEST_QUEUE.task_done()
+                    # Process the request
+                    if request.request_type == RequestType.ASK:
+                        await process_ask_request(request)
+                    elif request.request_type == RequestType.RETRY:
+                        await process_retry_request(request)
+                finally:
+                    config.REQUEST_QUEUE.task_done()
+                    queue_item = None
 
                 # Add delay between requests to avoid rate limiting
                 if not config.REQUEST_QUEUE.empty():
@@ -88,6 +102,9 @@ async def process_request_queue() -> None:
             except Exception as e:
                 print(f"[ERROR] Error processing request: {e}")
                 continue
+            finally:
+                if queue_item is not None:
+                    config.REQUEST_QUEUE.task_done()
 
     finally:
         config.QUEUE_PROCESSOR_RUNNING = False
@@ -122,9 +139,9 @@ async def add_request_to_queue(
         tts=tts,
     )
 
-    await config.REQUEST_QUEUE.put(request)
+    await config.REQUEST_QUEUE.put(_build_queue_item(request))
     print(
-        f"[QUEUE] Added request {request_id} to queue (position: {config.REQUEST_QUEUE.qsize()})"
+        f"[QUEUE] Added request {request_id} to queue (size: {config.REQUEST_QUEUE.qsize()}, priority: {priority})"
     )
 
     # Start the queue processor if it's not running
@@ -162,9 +179,9 @@ async def add_message_request_to_queue(
         message=message,
     )
 
-    await config.REQUEST_QUEUE.put(request)
+    await config.REQUEST_QUEUE.put(_build_queue_item(request))
     print(
-        f"[QUEUE] Added message request {request_id} to queue (position: {config.REQUEST_QUEUE.qsize()})"
+        f"[QUEUE] Added message request {request_id} to queue (size: {config.REQUEST_QUEUE.qsize()}, priority: {priority})"
     )
 
     # Start the queue processor if it's not running
@@ -183,15 +200,19 @@ async def _create_retry_button_and_schedule_expiry(
     # Create retry button with one-time token and timestamp
     retry_token = uuid.uuid4().hex[:8]
     retry_timestamp = int(datetime.datetime.now().timestamp())
-    custom_id = f"retry_{request.user_id}_{hash(request.question) % 1000000}_{retry_token}_{retry_timestamp}"
+    question_hash = hashlib.sha256(request.question.encode("utf-8")).hexdigest()[:12]
+    custom_id = f"retry_{request.user_id}_{question_hash}_{retry_token}_{retry_timestamp}"
 
-    # Persist media and original context for retry if present
+    # Persist original retry data so retry buttons survive process restarts.
     try:
-        save_retry_media(custom_id, request.media_parts)
-    except Exception:
-        pass
-    try:
-        save_retry_context(custom_id, request.context_string)
+        save_retry_record(
+            custom_id=custom_id,
+            user_id=request.user_id,
+            question=request.question,
+            context_string=request.context_string,
+            tts=request.tts,
+            media_parts=request.media_parts,
+        )
     except Exception:
         pass
 
@@ -227,11 +248,7 @@ async def _create_retry_button_and_schedule_expiry(
             )
             await msg.edit(view=disable_view)
             # Cleanup any persisted media/context now that the button expired
-            cleanup_retry_media(cid)
-            try:
-                config.RETRY_CONTEXT_TEMP.pop(cid, None)
-            except Exception:
-                pass
+            cleanup_retry_record(cid)
         except Exception:
             pass
 
@@ -253,9 +270,9 @@ async def process_ask_request(request: QueuedRequest) -> None:
             f"[CONTEXT] Context preview (first 500 chars): {request.context_string[:500]}..."
         )
 
-        # Try to get response from Gemini with model fallback
+        # Try to get response from the configured LLM provider with fallback.
         response, token_usage = await asyncio.wait_for(
-            try_gemini_models(
+            generate_response_with_llm(
                 request.question, request.context_string, request.media_parts
             ),
             timeout=60.0,
@@ -426,7 +443,7 @@ async def process_retry_request(request: QueuedRequest) -> None:
         print(f"[RETRY] Processing retry request: {request.question[:50]}...")
 
         response, token_usage = await asyncio.wait_for(
-            try_gemini_models(
+            generate_response_with_llm(
                 request.question, request.context_string, request.media_parts
             ),
             timeout=60.0,

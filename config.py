@@ -3,6 +3,7 @@
 import os
 import datetime
 import asyncio
+import itertools
 from typing import Dict, Any, Optional
 
 from dotenv import load_dotenv
@@ -94,11 +95,13 @@ CHANNEL_SUMMARY_CACHE: Dict[int, Dict[str, Any]] = {}
 # Temp storage for retryable media and context
 TEMP_MEDIA_DIR: str = os.path.join(os.getcwd(), "temp_media")
 ASK_IMAGES_DIR: str = os.path.join(TEMP_MEDIA_DIR, "ask_images")
+RETRY_RECORDS_DIR: str = os.path.join(TEMP_MEDIA_DIR, "retry_records")
 RETRY_MEDIA_TEMP: Dict[str, list] = {}
 RETRY_CONTEXT_TEMP: Dict[str, str] = {}
 
 # Request queue
-REQUEST_QUEUE: asyncio.Queue = asyncio.Queue()
+REQUEST_QUEUE: asyncio.PriorityQueue = asyncio.PriorityQueue()
+REQUEST_QUEUE_SEQUENCE = itertools.count()
 QUEUE_PROCESSOR_RUNNING: bool = False
 
 

@@ -106,9 +106,15 @@ def setup_memory_commands(tree: app_commands.CommandTree, client: discord.Client
             )
             return
         try:
-            delete_memory(
+            deleted = delete_memory(
                 memory_id, interaction.channel.id if interaction.channel else 0
             )
+            if not deleted:
+                await interaction.response.send_message(
+                    f"Memory {memory_id} was not found in this channel.",
+                    ephemeral=True,
+                )
+                return
             await interaction.response.send_message(
                 f"Memory {memory_id} deleted.",
                 ephemeral=True,

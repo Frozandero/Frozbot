@@ -22,7 +22,7 @@ def setup_imagine_commands(tree: app_commands.CommandTree, client: discord.Clien
 
     @tree.command(
         name="imagine",
-        description="Generate an image from a prompt using Gemini. Optionally include an image for reference.",
+        description="Generate an image from a prompt. Optionally include an image for reference.",
         guild=None,
     )
     async def imagine_command(
@@ -30,7 +30,7 @@ def setup_imagine_commands(tree: app_commands.CommandTree, client: discord.Clien
         prompt: str,
         image: Optional[discord.Attachment] = None,
     ) -> None:
-        """Create an image from text using Gemini image generation."""
+        """Create an image from text using the configured provider if supported."""
         if is_banned(interaction.user.id):
             await interaction.response.send_message(
                 "You are banned from using the imagine command.",

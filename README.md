@@ -1,13 +1,14 @@
 ## Discord IQ Bot (Python)
 
-A Discord bot that provides IQ calculation and AI chat functionality using Google's Gemini AI. The bot can calculate deterministic, fake IQ values and answer questions with context-aware responses.
+A Discord bot that provides IQ calculation and AI chat functionality through a configurable LLM provider. The bot can calculate deterministic, fake IQ values and answer questions with context-aware responses.
 
 ### Features
 - Deterministic per-user IQ calculation using SHA-256 of stable identifiers
 - Normal distribution with mean 100 and standard deviation 15
-- AI chat functionality using Google Gemini models with fallback
+- AI chat functionality using the configured LLM provider with model fallback
 - Context-aware responses using server, user, and message history
-- Rate limiting and request queuing system
+- Rate limiting and priority-aware request queuing system
+- Retry buttons that persist retry context across bot restarts while they are unexpired
 - Owner-only configuration commands
 - Implemented as slash commands: `/iq`, `/ask`, `/queue`, `/config`, etc.
 
@@ -16,7 +17,7 @@ A Discord bot that provides IQ calculation and AI chat functionality using Googl
 - A Discord application and bot token with the following OAuth2 scopes when inviting:
   - `bot`
   - `applications.commands`
-- Google Gemini API key for AI chat functionality
+- Gemini or xAI API key for AI chat functionality, depending on `LLM_PROVIDER`
 
 ### Setup
 1. Clone or open this project.
@@ -45,7 +46,9 @@ A Discord bot that provides IQ calculation and AI chat functionality using Googl
    ```env
    DISCORD_BOT_TOKEN=your-bot-token-here
    OWNER_ID=your-user-id-here
+   LLM_PROVIDER=gemini
    GEMINI_API_KEY=your-gemini-api-key-here
+   # or use LLM_PROVIDER=xai with XAI_API_KEY
    # Optional: provide a test guild ID to sync commands instantly in one server
    # If omitted, commands are synced globally (can take up to 1 hour to appear)
    # DISCORD_GUILD_ID=123456789012345678
@@ -67,7 +70,7 @@ python bot.py
 #### User Commands
 - `/iq [user]` - Get the IQ of a user (or yourself if no user specified)
 - `/ask <question>` - Ask the bot a question using AI
-- `/imagine <prompt> [image]` - Generate an image from a text prompt using Gemini image generation. Optionally include an image for reference/modification
+- `/imagine <prompt> [image]` - Generate an image from a text prompt when the configured provider supports image generation. Optionally include an image for reference/modification
 - `/queue` - Check the current request queue status
 
 #### Owner Commands

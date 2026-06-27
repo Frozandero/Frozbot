@@ -24,7 +24,7 @@ from context import (
 )
 from emoji import list_guild_emoji_names
 from database import is_banned
-from llm import get_gemini_client, summarize_messages_with_gemini
+from llm import get_llm_client, summarize_messages_with_llm
 from eleven import get_eleven_client
 from request_queue import RequestType, add_request_to_queue
 from utils import store_user_question, cleanup_expired_cooldowns
@@ -111,8 +111,8 @@ def setup_ask_commands(tree: app_commands.CommandTree, client: discord.Client):
             for uid in users_to_remove:
                 del config.RECENT_QUESTIONS[uid]
 
-        gemini_client = get_gemini_client()
-        if not gemini_client:
+        llm_client = get_llm_client()
+        if not llm_client:
             try:
                 await interaction.response.send_message(
                     "The bot is not configured with an LLM provider. Please contact the server owner.",
@@ -120,7 +120,7 @@ def setup_ask_commands(tree: app_commands.CommandTree, client: discord.Client):
                 )
             except discord.errors.NotFound:
                 print(
-                    f"Interaction not found when sending Gemini config error for: {question}"
+                    f"Interaction not found when sending LLM config error for: {question}"
                 )
                 return
             return
@@ -262,7 +262,7 @@ def setup_ask_commands(tree: app_commands.CommandTree, client: discord.Client):
                         if m["embeds"] > 0:
                             line += f" (+{m['embeds']} embeds)"
                         serialized.append(line)
-                    summary, summary_token_usage = await summarize_messages_with_gemini(
+                    summary, summary_token_usage = await summarize_messages_with_llm(
                         "\n".join(serialized)
                     )
                     channel_summary_str = summary or None
