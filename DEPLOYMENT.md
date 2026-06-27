@@ -19,21 +19,7 @@ ssh user@your-vps-ip
 cd frozbot
 ```
 
-### 3. Set Up Python Environment
-```bash
-# Install Python venv if not already installed
-sudo apt update
-sudo apt install python3-venv
-
-# Create virtual environment
-python3 -m venv .venv
-source .venv/bin/activate
-
-# Install dependencies
-pip install -r requirements.txt
-```
-
-### 4. Configure Environment Variables
+### 3. Configure Environment Variables
 ```bash
 # Copy the example config
 cp config.env.example .env
@@ -49,26 +35,47 @@ DISCORD_GUILD_ID=your_guild_id_optional
 OWNER_ID=your_discord_user_id
 ```
 
-### 5. Install and Start the Service
+### 4. Bootstrap the Service
 ```bash
 # Make deploy script executable
 chmod +x deploy.sh
 
-# Install the systemd service
-./deploy.sh install
-
-# Edit the service file with correct paths
-sudo nano /etc/systemd/system/frozbot.service
+# Create the frozbot system user, install to /opt/frozbot, create the venv,
+# install dependencies, register the service, and start it.
+sudo ./deploy.sh bootstrap
 ```
 
-**Important**: Update these paths in the service file:
-- `User=YOUR_USERNAME` → Your actual VPS username
-- `WorkingDirectory=/path/to/your/frozbot` → Actual path to your bot
-- `Environment=PATH=/path/to/your/frozbot/.venv/bin` → Actual path to your venv
+The bootstrap command creates a dedicated `frozbot` system user and copies the app to `/opt/frozbot`. This is recommended when the repo was cloned under `/root`, because non-root service users cannot normally read files inside `/root`.
 
-### 6. Start the Bot
+Optional bootstrap overrides:
 ```bash
-# Start the bot service
+sudo FROZBOT_BOOTSTRAP_USER=mybot ./deploy.sh bootstrap
+sudo FROZBOT_BOOTSTRAP_DIR=/srv/frozbot ./deploy.sh bootstrap
+```
+
+### 5. Manual Service Install
+If you already created a virtual environment and want the service to run from the current checkout:
+```bash
+python3 -m venv .venv
+source .venv/bin/activate
+pip install -r requirements.txt
+
+./deploy.sh install
+./deploy.sh start
+```
+
+The install command generates `/etc/systemd/system/frozbot.service` using the current checkout path and current Unix user. It auto-detects Python from `.venv`, `venv`, or `env` under the repo, then falls back to `python3`/`python` on `PATH`.
+
+Optional overrides:
+```bash
+FROZBOT_SERVICE_USER=frozbot ./deploy.sh install
+FROZBOT_VENV_DIR=/opt/frozbot/.venv ./deploy.sh install
+FROZBOT_PYTHON=/opt/frozbot/.venv/bin/python ./deploy.sh install
+```
+
+### 6. Manage the Bot
+```bash
+# Start the bot service if using manual install
 ./deploy.sh start
 
 # Check status
