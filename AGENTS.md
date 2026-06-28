@@ -4,7 +4,7 @@ Do not use code formatters unless explicitly instructed.
 
 ## Purpose
 
-Frozbot is a personal Discord AI bot written in Python. It supports slash-command and mention-based LLM chat, image generation, ElevenLabs TTS, custom emoji replacement, retry buttons, per-channel memories in SQLite, and owner-only admin commands.
+Frozbot is a personal Discord AI bot written in Python. It supports slash-command and mention-based LLM chat, channel summaries, image generation, ElevenLabs TTS, custom emoji replacement, retry buttons, per-channel memories in SQLite, and owner-only admin commands.
 
 This file is the primary orientation document for future coding agents. Keep it accurate when changing architecture, commands, environment variables, or operational workflows.
 
@@ -54,12 +54,13 @@ Important optional environment:
 - `config.py`: Loads environment variables and owns mutable runtime state such as cooldowns, retry caches, channel-summary cache, and the request queue.
 - `commands/`: Registers slash commands by feature area.
   - `ask.py`: `/ask`, context assembly for slash commands, optional image and TTS.
+  - `summarize.py`: `/summarize`, recent channel conversation summaries using the shared summary helper.
   - `imagine.py`: `/imagine`, image generation, optional prompt reference images and mentioned-user avatars.
   - `memory.py`: `/setmemory`, `/getmemory`, `/deletememory`.
   - `admin.py`: owner-only settings, queue/cache controls, bans, refresh, emoji debug.
   - `misc.py`: `/iq`, `/queue`, `/say`.
 - `handlers.py`: Discord events, retry-button interactions, mention-based chat, command sync on ready.
-- `context.py`: Shared context construction for recent messages, channel summaries, user/member info, replied-message context, memories, and final system prompt.
+- `context.py`: Shared context construction for `/ask`, mention chat, and `/summarize`; recent messages, channel summaries, user/member info, replied-message context, memories, and trusted/untrusted prompt sections.
 - `request_queue.py`: Priority-aware async request processing for ask/retry requests and response delivery.
 - `llm.py`: Provider-neutral facade around the provider system.
 - `llm_providers/`: Provider abstraction, provider registry, and concrete Gemini/Mistral/xAI implementations.
@@ -78,7 +79,7 @@ Important optional environment:
 - Gemini text/chat and image-generation fallback models are configurable through `GEMINI_TEXT_IMAGE_MODELS` and `GEMINI_IMAGE_MODELS`; do not hard-code assumptions about the project's billing tier.
 - The Mistral provider uses `mistralai>=2.0.0`, chat completions for text and vision input, and an optional configured image-generation agent for `/imagine`. Do not auto-create remote Mistral agents during normal bot requests.
 - Slash command registration is config-sensitive at sync time. `ASK_ENABLE` and `IMAGINE_ENABLE` hide commands when false, and TTS options are omitted when ElevenLabs is not configured.
-- Keep slash-command `/ask` and mention-based chat behavior aligned. If you change context assembly in `commands/ask.py`, check whether `_build_message_context()` in `handlers.py` needs the same change.
+- Keep slash-command `/ask` and mention-based chat behavior aligned through `context.build_ask_context()`.
 - Always defer Discord interactions before long work such as history reads, LLM calls, image processing, TTS, or network fetches.
 - Never call blocking SDK/network work directly on the event loop. Existing provider code uses executors around blocking clients.
 - Keep user-visible Discord messages within the 2000-character limit or use attachments/files when appropriate.

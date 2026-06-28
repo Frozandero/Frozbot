@@ -63,9 +63,11 @@ class CommandRegistrationTests(unittest.TestCase):
 
         ask_command = tree.get_command("ask")
         say_command = tree.get_command("say")
+        summarize_command = tree.get_command("summarize")
 
         self.assertNotIn("tts", [param.name for param in ask_command.parameters])
         self.assertNotIn("tts", [param.name for param in say_command.parameters])
+        self.assertIsNotNone(summarize_command)
 
 
 if __name__ == "__main__":

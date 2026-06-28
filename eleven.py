@@ -1,3 +1,4 @@
+import asyncio
 import os
 import re
 import subprocess
@@ -54,6 +55,11 @@ def generate_tts(text: str) -> bytes:
     except Exception as e:
         print(f"Error generating TTS: {e}")
         return b""
+
+
+async def generate_tts_async(text: str) -> bytes:
+    """Generate TTS audio without blocking the event loop."""
+    return await asyncio.to_thread(generate_tts, text)
 
 
 def cleanup_text_for_tts(text: str) -> str:

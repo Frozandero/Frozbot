@@ -20,7 +20,7 @@ from retry import (
     save_retry_record,
 )
 from llm import generate_response_with_llm
-from eleven import generate_tts
+from eleven import generate_tts_async
 
 
 class RequestType(Enum):
@@ -337,7 +337,7 @@ async def process_ask_request(request: QueuedRequest) -> None:
             if request.tts and not is_message_request:
                 try:
                     print(f"[TTS] Generating TTS for response...")
-                    tts_audio = generate_tts(replaced_answer)
+                    tts_audio = await generate_tts_async(replaced_answer)
                     if not tts_audio:
                         print(f"[ERROR] Failed to generate TTS")
                         return
@@ -490,7 +490,7 @@ async def process_retry_request(request: QueuedRequest) -> None:
             if request.tts:
                 try:
                     print(f"[TTS] Generating TTS for retry response...")
-                    tts_audio = generate_tts(replaced_answer)
+                    tts_audio = await generate_tts_async(replaced_answer)
                     if not tts_audio:
                         print(f"[ERROR] Failed to generate TTS for retry")
                         return

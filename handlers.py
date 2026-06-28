@@ -3,29 +3,14 @@
 import datetime
 import hashlib
 import io
-import re
 from typing import Optional
 
 import discord
 from PIL import Image
 
 import config
-from context import (
-    process_mentions_in_question,
-    fetch_channel_memories,
-    build_user_context,
-    format_mentioned_users_context,
-    format_user_context,
-    get_recent_channel_messages,
-    get_user_recent_messages,
-    format_channel_messages,
-    format_bot_previous_responses,
-    build_full_context_string,
-    fetch_replied_message_context,
-    format_replied_message_context,
-)
+from context import build_ask_context
 from database import is_banned
-from emoji import list_guild_emoji_names
 from llm import get_llm_client
 from request_queue import (
     RequestType,
@@ -185,17 +170,21 @@ def setup_handlers(client: discord.Client, tree: discord.app_commands.CommandTre
             except Exception as e:
                 print(f"Failed to process image attachment: {e}")
 
-            # Build context
-            context_string = await _build_message_context(
-                client, message, question, media_parts
+            built_context = await build_ask_context(
+                client=client,
+                user=message.author,
+                channel=message.channel,
+                guild=message.guild,
+                question=question,
+                source_message=message,
             )
 
             # Add to queue
             request_id = await add_message_request_to_queue(
                 RequestType.ASK,
                 message,
-                question,
-                context_string,
+                built_context.processed_question,
+                built_context.context_string,
                 message.author.id,
                 priority=1 if config.is_owner(message.author.id) else 0,
                 media_parts=media_parts,
@@ -375,197 +364,3 @@ async def _handle_retry_button(
         except:
             pass
 
-
-async def _build_message_context(
-    client: discord.Client,
-    message: discord.Message,
-    question: str,
-    media_parts: Optional[list],
-) -> str:
-    """Build context string for a message-based request."""
-    # Fetch replied-to message context if this is a reply
-    replied_context = None
-    replied_author_id = None
-    if message.reference:
-        replied_context = await fetch_replied_message_context(message)
-        if replied_context:
-            replied_author_id = replied_context.get("author_id")
-
-    # Process mentions
-    mentioned_users_context = []
-    mention_pattern = r"<@!?(\d+)>"
-    matches = re.findall(mention_pattern, question)
-    processed_question = question
-    mentioned_user_ids = set()
-
-    for user_id_str in matches:
-        try:
-            mentioned_user_id = int(user_id_str)
-            if mentioned_user_id == client.user.id:
-                continue
-
-            mentioned_user_ids.add(mentioned_user_id)
-
-            if message.guild:
-                member = message.guild.get_member(mentioned_user_id)
-                if member:
-                    recent_messages = await get_user_recent_messages(
-                        message.channel, mentioned_user_id
-                    )
-                    mentioned_users_context.append(
-                        {
-                            "name": member.display_name,
-                            "username": member.name,
-                            "joined_at": (
-                                member.joined_at.strftime("%Y-%m-%d")
-                                if member.joined_at
-                                else "Unknown"
-                            ),
-                            "roles": (
-                                [role.name for role in member.roles[1:]]
-                                if len(member.roles) > 1
-                                else []
-                            ),
-                            "top_role": (
-                                member.top_role.name if member.top_role else "No roles"
-                            ),
-                            "nickname": member.nick if member.nick else None,
-                            "recent_messages": recent_messages,
-                        }
-                    )
-                    processed_question = processed_question.replace(
-                        f"<@{mentioned_user_id}>", f"@{member.display_name}"
-                    )
-                    processed_question = processed_question.replace(
-                        f"<@!{mentioned_user_id}>", f"@{member.display_name}"
-                    )
-        except ValueError:
-            pass
-
-    # Add replied-to message author to mentioned users if not already included
-    if (
-        replied_context
-        and replied_author_id
-        and replied_author_id not in mentioned_user_ids
-    ):
-        author_context = replied_context.get("author_context", {})
-        if author_context:
-            mentioned_users_context.append(author_context)
-            mentioned_user_ids.add(replied_author_id)
-
-    # Fetch memories
-    sender_username = message.author.name
-    mentioned_usernames = [
-        u["username"] for u in mentioned_users_context if isinstance(u, dict)
-    ]
-    # Also include replied-to message author in memories fetch
-    if replied_context and replied_author_id:
-        author_context = replied_context.get("author_context", {})
-        if author_context and "username" in author_context:
-            author_username = author_context["username"]
-            if author_username not in mentioned_usernames:
-                mentioned_usernames.append(author_username)
-
-    channel_id = message.channel.id
-    generic_memories, user_memories = fetch_channel_memories(
-        channel_id, sender_username, mentioned_usernames, memory_limit=5
-    )
-
-    # Build server context
-    if message.guild:
-        server_context_parts = [f"Name: {message.guild.name}"]
-        if generic_memories:
-            server_context_parts.append("Server Memories:")
-            for i, (memory_id, username, memory) in enumerate(generic_memories, 1):
-                server_context_parts.append(f"  {i}. {memory}")
-        else:
-            server_context_parts.append("Server Memories: None")
-        server_context = "\n".join(server_context_parts)
-    else:
-        server_context = None
-
-    # Date context
-    date_context = datetime.datetime.now().strftime("%Y-%m-%d %H:%M")
-
-    # User context
-    user_context = build_user_context(message.author)
-    user_recent_messages = await get_user_recent_messages(
-        message.channel, message.author.id
-    )
-    user_context["recent_messages"] = user_recent_messages
-
-    # Channel context
-    channel_context = message.channel.name if hasattr(message.channel, "name") else None
-
-    # Channel raw context
-    bot_id = client.user.id if client.user else None
-    recent_channel_messages, bot_recent_messages = await get_recent_channel_messages(
-        message.channel,
-        config.CHANNEL_CONTEXT_LAST,
-        self_bot_id=bot_id,
-        max_self_messages=2,
-    )
-
-    channel_raw_context_str = format_channel_messages(
-        recent_channel_messages, config.CHANNEL_CONTEXT_LAST
-    )
-    bot_previous_responses_str = format_bot_previous_responses(bot_recent_messages)
-
-    # Channel summary (use cached if available)
-    channel_summary_str = None
-    if config.CHANNEL_SUMMARY_ENABLE:
-        channel_cache_id = message.channel.id
-        if channel_cache_id in config.CHANNEL_SUMMARY_CACHE:
-            cache_entry = config.CHANNEL_SUMMARY_CACHE[channel_cache_id]
-            cached_at_val = cache_entry.get("cached_at")
-            cached_at: Optional[datetime.datetime] = (
-                cached_at_val if isinstance(cached_at_val, datetime.datetime) else None
-            )
-            if (
-                cached_at
-                and (datetime.datetime.now() - cached_at).total_seconds()
-                < config.CHANNEL_SUMMARY_TTL_MIN * 60
-            ):
-                channel_summary_str = cache_entry.get("summary")
-
-    # Guild emojis
-    guild = message.guild
-    emoji_names: list[str] = []
-    if guild and hasattr(guild, "id") and hasattr(guild, "emojis"):
-        emoji_names = await list_guild_emoji_names(guild)
-
-    # Format contexts
-    mentioned_users_str = format_mentioned_users_context(
-        mentioned_users_context, user_memories
-    )
-    user_context_str = format_user_context(user_context, user_memories)
-
-    # Format replied-to message context
-    replied_message_str = None
-    if replied_context:
-        replied_message_str = format_replied_message_context(
-            replied_context, user_memories
-        )
-
-    # Get bot name
-    bot_name = (
-        message.guild.me.nick if message.guild and message.guild.me.nick else "Frozbot"
-    )
-
-    # Build full context
-    context_string = await build_full_context_string(
-        bot_name=bot_name,
-        server_context=server_context,
-        mentioned_users_str=mentioned_users_str,
-        date_context=date_context,
-        message_context=processed_question,
-        user_context_str=user_context_str,
-        channel_context=channel_context,
-        emoji_names=emoji_names,
-        channel_raw_context_str=channel_raw_context_str,
-        bot_previous_responses_str=bot_previous_responses_str,
-        channel_summary_str=channel_summary_str,
-        replied_message_str=replied_message_str,
-    )
-
-    return context_string

@@ -7,6 +7,7 @@ A Discord bot that provides IQ calculation and AI chat functionality through a c
 - Normal distribution with mean 100 and standard deviation 15
 - AI chat functionality using the configured LLM provider with model fallback
 - Context-aware responses using server, user, and message history
+- Channel summarization for recent conversation context and explicit `/summarize` requests
 - Rate limiting and priority-aware request queuing system
 - Retry buttons that persist retry context across bot restarts while they are unexpired
 - Owner-only configuration commands
@@ -73,6 +74,7 @@ python bot.py
 #### User Commands
 - `/iq [user]` - Get the IQ of a user (or yourself if no user specified)
 - `/ask <question>` - Ask the bot a question using AI
+- `/summarize [depth] [refresh]` - Summarize recent messages in the current channel
 - `/imagine <prompt> [image]` - Generate an image from a text prompt when the configured provider supports image generation and the configured account has access. Optionally include an image for reference/modification.
 - `/queue` - Check the current request queue status
 
@@ -98,6 +100,7 @@ The bot supports several configurable parameters that can be set via environment
 - This bot requires the Message Content intent for AI chat functionality.
 - The IQ is not meant to be real or serious; it is purely for entertainment.
 - AI responses are context-aware and include server, user, and message history information.
+- `/ask`, mention chat, and `/summarize` share the channel summary helpers. Ask-style prompts separate stable bot policy from untrusted Discord context.
 - Rate limiting applies to non-owner users to prevent spam.
 - The bot uses a queue system to handle multiple requests efficiently.
 - The Gemini provider uses the Interactions API with `store=False`; Frozbot sends its own Discord context each turn instead of relying on server-side Gemini conversation state.

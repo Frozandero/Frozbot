@@ -8,7 +8,7 @@ from discord import app_commands
 
 import config
 from iq import compute_deterministic_iq
-from eleven import generate_tts, get_eleven_client
+from eleven import generate_tts_async, get_eleven_client
 
 
 def setup_misc_commands(tree: app_commands.CommandTree, client: discord.Client):
@@ -107,7 +107,7 @@ def setup_misc_commands(tree: app_commands.CommandTree, client: discord.Client):
 
                 await interaction.response.defer(thinking=True)
 
-                tts_audio = generate_tts(message)
+                tts_audio = await generate_tts_async(message)
                 if not tts_audio:
                     await interaction.followup.send(
                         "❌ **TTS Failed**\n\nFailed to generate text-to-speech audio.",

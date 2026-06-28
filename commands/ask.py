@@ -9,22 +9,9 @@ from discord import app_commands
 from PIL import Image
 
 import config
-from context import (
-    process_mentions_in_question,
-    fetch_channel_memories,
-    build_user_context,
-    format_mentioned_users_context,
-    format_user_context,
-    get_recent_channel_messages,
-    get_channel_messages_for_summary,
-    get_user_recent_messages,
-    format_channel_messages,
-    format_bot_previous_responses,
-    build_full_context_string,
-)
-from emoji import list_guild_emoji_names
+from context import build_ask_context
 from database import is_banned
-from llm import get_llm_client, summarize_messages_with_llm
+from llm import get_llm_client
 from eleven import get_eleven_client
 from request_queue import RequestType, add_request_to_queue
 from utils import store_user_question, cleanup_expired_cooldowns
@@ -140,184 +127,20 @@ def setup_ask_commands(tree: app_commands.CommandTree, client: discord.Client):
         except Exception as e:
             print(f"Failed to process image attachment: {e}")
 
-        # Process mentions in question
-        processed_question, mentioned_users_context = (
-            await process_mentions_in_question(
-                question, interaction.guild, interaction.channel, interaction.client
-            )
-        )
-
-        # Fetch channel memories
-        sender_username = interaction.user.name if interaction.user else "Unknown"
-        mentioned_usernames = []
-        for user_data in mentioned_users_context:
-            if isinstance(user_data, dict) and "username" in user_data:
-                mentioned_usernames.append(user_data["username"])
-
-        channel_id = interaction.channel.id if interaction.channel else 0
-        generic_memories, user_memories = fetch_channel_memories(
-            channel_id, sender_username, mentioned_usernames, memory_limit=5
-        )
-
-        # Build server context
-        if interaction.guild:
-            server_context_parts = [f"Name: {interaction.guild.name}"]
-            if generic_memories:
-                server_context_parts.append("Server Memories:")
-                for i, (memory_id, username, memory) in enumerate(generic_memories, 1):
-                    server_context_parts.append(f"  {i}. {memory}")
-            else:
-                server_context_parts.append("Server Memories: None")
-            server_context = "\n".join(server_context_parts)
-        else:
-            server_context = None
-
-        # Date context
-        date_context = datetime.datetime.now().strftime("%Y-%m-%d %H:%M")
-
-        # User context
-        user_context = build_user_context(interaction.user)
-        user_recent_messages = await get_user_recent_messages(
-            interaction.channel, interaction.user.id
-        )
-        user_context["recent_messages"] = user_recent_messages
-
-        # Channel context
-        channel_context = getattr(interaction.channel, "name", None)
-
-        # Channel raw context
-        bot_id = client.user.id if client.user else None
-        recent_channel_messages, bot_recent_messages = (
-            await get_recent_channel_messages(
-                interaction.channel,
-                config.CHANNEL_CONTEXT_LAST,
-                self_bot_id=bot_id,
-                max_self_messages=2,
-            )
-        )
-
-        channel_raw_context_str = format_channel_messages(
-            recent_channel_messages, config.CHANNEL_CONTEXT_LAST
-        )
-        bot_previous_responses_str = format_bot_previous_responses(bot_recent_messages)
-
-        # Channel summary
-        channel_summary_str = None
-        if config.CHANNEL_SUMMARY_ENABLE and interaction.channel:
-            summary_channel_id = getattr(interaction.channel, "id", None)
-            needs_summary = True
-
-            if (
-                isinstance(summary_channel_id, int)
-                and summary_channel_id in config.CHANNEL_SUMMARY_CACHE
-            ):
-                cache_entry = config.CHANNEL_SUMMARY_CACHE[summary_channel_id]
-                cached_at_val = cache_entry.get("cached_at")
-                cached_at: Optional[datetime.datetime] = (
-                    cached_at_val
-                    if isinstance(cached_at_val, datetime.datetime)
-                    else None
-                )
-                cache_newest: Optional[int] = cache_entry.get("newest_id")
-
-                try:
-                    _, newest_id = await get_channel_messages_for_summary(
-                        interaction.channel, 1
-                    )
-                except Exception:
-                    newest_id = None
-
-                if (
-                    cache_newest is not None
-                    and newest_id is not None
-                    and newest_id == cache_newest
-                ):
-                    channel_summary_str = cache_entry.get("summary")
-                    needs_summary = False
-                elif (
-                    newest_id is None
-                    and cached_at
-                    and (datetime.datetime.now() - cached_at).total_seconds()
-                    < config.CHANNEL_SUMMARY_TTL_MIN * 60
-                ):
-                    channel_summary_str = cache_entry.get("summary")
-                    needs_summary = False
-
-            if needs_summary:
-                messages_for_summary, newest_id = (
-                    await get_channel_messages_for_summary(
-                        interaction.channel, config.CHANNEL_SUMMARY_DEPTH
-                    )
-                )
-                if messages_for_summary:
-                    serialized = []
-                    for m in reversed(
-                        messages_for_summary[-config.CHANNEL_SUMMARY_DEPTH :]
-                    ):
-                        line = f"[{m['timestamp']}] {m['author']}: {m['content']}"
-                        if m["attachments"] > 0:
-                            line += f" (+{m['attachments']} attachments)"
-                        if m["embeds"] > 0:
-                            line += f" (+{m['embeds']} embeds)"
-                        serialized.append(line)
-                    summary, summary_token_usage = await summarize_messages_with_llm(
-                        "\n".join(serialized)
-                    )
-                    channel_summary_str = summary or None
-                    # Always log token usage after summary request
-                    print(
-                        f"[SUMMARY] Token usage for channel summary: "
-                        f"{summary_token_usage.input_tokens} input, {summary_token_usage.output_tokens} output "
-                        f"(total: {summary_token_usage.total_tokens})"
-                    )
-
-                    if isinstance(summary_channel_id, int):
-                        config.CHANNEL_SUMMARY_CACHE[summary_channel_id] = {
-                            "summary": channel_summary_str,
-                            "cached_at": datetime.datetime.now(),
-                            "newest_id": newest_id,
-                        }
-
-        # Guild emojis
-        guild = interaction.guild
-        emoji_names: list[str] = []
-        if guild and hasattr(guild, "id") and hasattr(guild, "emojis"):
-            emoji_names = await list_guild_emoji_names(guild)
-
-        # Format contexts
-        mentioned_users_str = format_mentioned_users_context(
-            mentioned_users_context, user_memories
-        )
-        user_context_str = format_user_context(user_context, user_memories)
-
-        # Get bot name
-        bot_name = (
-            interaction.guild.me.nick
-            if interaction.guild and interaction.guild.me.nick
-            else "Frozbot"
-        )
-
-        # Build full context
-        context_string = await build_full_context_string(
-            bot_name=bot_name,
-            server_context=server_context,
-            mentioned_users_str=mentioned_users_str,
-            date_context=date_context,
-            message_context=processed_question,
-            user_context_str=user_context_str,
-            channel_context=channel_context,
-            emoji_names=emoji_names,
-            channel_raw_context_str=channel_raw_context_str,
-            bot_previous_responses_str=bot_previous_responses_str,
-            channel_summary_str=channel_summary_str,
+        built_context = await build_ask_context(
+            client=client,
+            user=interaction.user,
+            channel=interaction.channel,
+            guild=interaction.guild,
+            question=question,
         )
 
         # Add request to queue
         request_id = await add_request_to_queue(
             RequestType.ASK,
             interaction,
-            processed_question,
-            context_string,
+            built_context.processed_question,
+            built_context.context_string,
             user_id,
             priority=1 if config.is_owner(user_id) else 0,
             media_parts=media_parts,

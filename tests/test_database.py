@@ -42,6 +42,15 @@ class DatabaseChannelScopeTests(unittest.TestCase):
         self.assertTrue(self.database.delete_memory(channel_two_memory_id, 2))
         self.assertEqual(self.database.count_memories_by_user("alice", 2), 0)
 
+    def test_empty_multi_user_memory_lookup_returns_empty_dict(self):
+        self.assertEqual(self.database.get_memories_for_users([], 1), {})
+
+    def test_duplicate_ban_is_ignored(self):
+        self.database.add_banned_user(123)
+        self.database.add_banned_user(123)
+
+        self.assertEqual(self.database.get_banned_users(), [123])
+
 
 if __name__ == "__main__":
     unittest.main()
