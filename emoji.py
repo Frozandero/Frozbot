@@ -5,6 +5,16 @@ from typing import Dict, Any, Optional
 
 import discord
 
+EMOJI_NAME_PATTERN = r"[A-Za-z0-9_]{2,32}"
+GUILD_EMOJI_TOKEN_RE = re.compile(rf"(?<!<)(?<!<a)\\?:({EMOJI_NAME_PATTERN})\\?:")
+
+
+def _log(message: str) -> None:
+    try:
+        print(message)
+    except UnicodeEncodeError:
+        print(message.encode("ascii", "backslashreplace").decode("ascii"))
+
 
 async def debug_guild_emoji_state(guild: Optional[discord.Guild]) -> str:
     """Debug function to check the state of guild emojis and help troubleshoot issues."""
@@ -91,8 +101,8 @@ async def replace_guild_emojis_in_text(
 
     # Validate that guild is a proper Discord guild object
     if not hasattr(guild, "id") or not hasattr(guild, "emojis"):
-        print(
-            f"⚠️ Invalid guild object passed to replace_guild_emojis_in_text: {type(guild)}"
+        _log(
+            f"[WARN] Invalid guild object passed to replace_guild_emojis_in_text: {type(guild)}"
         )
         return text
 
@@ -100,71 +110,71 @@ async def replace_guild_emojis_in_text(
     try:
         guild_id = getattr(guild, "id", None)
         if not guild_id:
-            print("⚠️ Guild object has no valid ID")
+            _log("[WARN] Guild object has no valid ID")
             return text
     except Exception as e:
-        print(f"⚠️ Error accessing guild ID: {e}")
+        _log(f"[WARN] Error accessing guild ID: {e}")
         return text
 
     # Pre-process: Normalize Unicode colon variants to ASCII colons
     unicode_colon_variants = ["：", "﹕", "︓", "꞉", "∶"]
     for variant in unicode_colon_variants:
         if variant in text:
-            print(f"🔧 Normalizing Unicode colon variant '{variant}' to ASCII ':'")
+            _log(f"[emoji] Normalizing Unicode colon variant '{variant}' to ASCII ':'")
             text = text.replace(variant, ":")
 
     # Pre-process: Fix malformed Discord emoji patterns like <:name:> or <a:name:> (missing ID)
-    malformed_emoji_pattern = re.compile(r"<(a?):([A-Za-z0-9_]{2,32}):>")
+    malformed_emoji_pattern = re.compile(rf"<(a?):({EMOJI_NAME_PATTERN}):>")
     malformed_matches = malformed_emoji_pattern.findall(text)
     if malformed_matches:
-        print(f"🔧 Found malformed emoji patterns (missing ID): {malformed_matches}")
+        _log(f"[emoji] Found malformed emoji patterns (missing ID): {malformed_matches}")
         text = malformed_emoji_pattern.sub(r":\2:", text)
-        print(f"🔧 Fixed malformed emojis, text now: {text[:100]}...")
+        _log(f"[emoji] Fixed malformed emojis, text now: {text[:100]}...")
 
-    # Match :name: not part of an existing custom emoji like <:name:id> or <a:name:id>
-    pattern = re.compile(r"(?<!<)(?<!<a):([A-Za-z0-9_]{2,32}):")
-    names_in_text = set(pattern.findall(text))
+    # Match :name: and LLM-escaped \:name\: tokens, but not existing
+    # Discord custom emoji mentions such as <:name:id> or <a:name:id>.
+    names_in_text = set(GUILD_EMOJI_TOKEN_RE.findall(text))
     if not names_in_text:
         return text
 
-    print(f"🔍 Found emoji names in text: {names_in_text}")
+    _log(f"[emoji] Found emoji names in text: {names_in_text}")
 
     # Build name -> emoji mapping (case-insensitive by name)
     name_to_emoji: Dict[str, Any] = {}
     try:
         # First try to get emojis from cache
         cached_emojis = getattr(guild, "emojis", [])
-        print(f"[DEBUG] Found {len(cached_emojis)} cached emojis in guild {guild_id}")
+        _log(f"[DEBUG] Found {len(cached_emojis)} cached emojis in guild {guild_id}")
 
         for e in cached_emojis:
             try:
                 if hasattr(e, "name") and e.name:
                     name_to_emoji[str(e.name).lower()] = e
             except Exception as emoji_error:
-                print(f"  ❌ Error processing cached emoji: {emoji_error}")
+                _log(f"  [WARN] Error processing cached emoji: {emoji_error}")
                 continue
 
         # Check which emojis are missing from cache
         missing = {n for n in names_in_text if n.lower() not in name_to_emoji}
         if missing:
-            print(f"🔄 Fetching missing emojis: {missing}")
+            _log(f"[emoji] Fetching missing emojis: {missing}")
             try:
                 fetched = await guild.fetch_emojis()
-                print(f"📥 Fetched {len(fetched)} emojis from guild {guild_id}")
+                _log(f"[emoji] Fetched {len(fetched)} emojis from guild {guild_id}")
 
                 for e in fetched:
                     try:
                         if hasattr(e, "name") and e.name:
                             name_to_emoji[str(e.name).lower()] = e
                     except Exception as emoji_error:
-                        print(f"  ❌ Error processing fetched emoji: {emoji_error}")
+                        _log(f"  [WARN] Error processing fetched emoji: {emoji_error}")
                         continue
             except Exception as fetch_error:
-                print(f"❌ Failed to fetch emojis from guild {guild_id}: {fetch_error}")
+                _log(f"[WARN] Failed to fetch emojis from guild {guild_id}: {fetch_error}")
                 # Continue with cached emojis only
 
         # Show final mapping
-        print(f"🎯 Final emoji mapping: {len(name_to_emoji)} emojis available")
+        _log(f"[emoji] Final emoji mapping: {len(name_to_emoji)} emojis available")
 
         def _sub(m: re.Match) -> str:
             name = m.group(1)
@@ -174,22 +184,22 @@ async def replace_guild_emojis_in_text(
                     emoji_str = str(emoji)
                     return emoji_str
                 except Exception as e:
-                    print(f"❌ Error converting emoji {emoji} to string: {e}")
+                    _log(f"[WARN] Error converting emoji {emoji} to string: {e}")
                     # Strip colons if conversion fails - shows just the name
                     return name
             else:
-                print(f"⚠️ No emoji found for :{name}:, stripping colons")
+                _log(f"[WARN] No emoji found for :{name}:, stripping colons")
                 # Strip the colons to make text readable instead of showing :name:
                 return name
 
-        result = pattern.sub(_sub, text)
-        print(
-            f"✅ Emoji replacement complete. Original: {text[:100]}... -> Result: {result[:100]}..."
+        result = GUILD_EMOJI_TOKEN_RE.sub(_sub, text)
+        _log(
+            f"[emoji] Emoji replacement complete. Original: {text[:100]}... -> Result: {result[:100]}..."
         )
         return result
 
     except Exception as e:
-        print(f"❌ Unexpected error in replace_guild_emojis_in_text: {e}")
+        _log(f"[ERROR] Unexpected error in replace_guild_emojis_in_text: {e}")
         import traceback
 
         traceback.print_exc()
