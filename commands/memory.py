@@ -1,5 +1,6 @@
 """Memory commands for Frozbot."""
 
+import logging
 from typing import Optional
 
 import discord
@@ -8,6 +9,8 @@ from discord import app_commands
 import config
 from database import add_memory, delete_memory, count_memories_by_user
 from views import MemoryPaginationView
+
+logger = logging.getLogger(__name__)
 
 
 def setup_memory_commands(tree: app_commands.CommandTree, client: discord.Client):
@@ -33,17 +36,34 @@ def setup_memory_commands(tree: app_commands.CommandTree, client: discord.Client
 
         try:
             username = user.name if user else "*"
+            user_id = user.id if user else None
+            display_name = user.display_name if user else None
 
             add_memory(
-                username, memory, interaction.channel.id if interaction.channel else 0
+                username,
+                memory,
+                interaction.channel.id if interaction.channel else 0,
+                user_id=user_id,
+                display_name=display_name,
             )
 
+            label = (
+                f"{display_name} (@{username}, id:{user_id})"
+                if user
+                else "this channel"
+            )
             await interaction.response.send_message(
-                f"Memory set for {username}.",
+                f"Memory set for {label}.",
                 ephemeral=True,
             )
         except Exception as e:
-            print(f"Error setting memory: {e}")
+            logger.exception(
+                "memory_set_error",
+                extra={
+                    "user_id": interaction.user.id,
+                    "error_type": type(e).__name__,
+                },
+            )
             await interaction.response.send_message(
                 f"Error setting memory: {e}",
                 ephemeral=True,
@@ -60,13 +80,18 @@ def setup_memory_commands(tree: app_commands.CommandTree, client: discord.Client
         limit: int = 10,
     ) -> None:
         username = user.name if user else "*"
+        target_user_id = user.id if user else None
+        display_name = user.display_name if user else None
         try:
             total_memories = count_memories_by_user(
-                username, interaction.channel.id if interaction.channel else 0
+                username,
+                interaction.channel.id if interaction.channel else 0,
+                user_id=target_user_id,
             )
             if total_memories == 0:
+                label = display_name or username
                 await interaction.response.send_message(
-                    f"No memories found for {username}.",
+                    f"No memories found for {label}.",
                     ephemeral=True,
                 )
                 return
@@ -78,13 +103,21 @@ def setup_memory_commands(tree: app_commands.CommandTree, client: discord.Client
                 page=0,
                 page_size=page_size,
                 channel_id=interaction.channel.id if interaction.channel else 0,
+                user_id=target_user_id,
+                display_name=display_name,
             )
 
             await interaction.response.send_message(
                 content=view.format_memories_message(), view=view
             )
         except Exception as e:
-            print(f"Error getting memory: {e}")
+            logger.exception(
+                "memory_get_error",
+                extra={
+                    "user_id": interaction.user.id,
+                    "error_type": type(e).__name__,
+                },
+            )
             await interaction.response.send_message(
                 f"Error getting memory: {e}",
                 ephemeral=True,
@@ -120,7 +153,14 @@ def setup_memory_commands(tree: app_commands.CommandTree, client: discord.Client
                 ephemeral=True,
             )
         except Exception as e:
-            print(f"Error deleting memory: {e}")
+            logger.exception(
+                "memory_delete_error",
+                extra={
+                    "user_id": interaction.user.id,
+                    "memory_id": memory_id,
+                    "error_type": type(e).__name__,
+                },
+            )
             await interaction.response.send_message(
                 f"Error deleting memory: {e}",
                 ephemeral=True,

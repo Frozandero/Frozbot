@@ -33,6 +33,7 @@ class LLMProvider(ABC):
         question: str,
         context_string: str,
         media_parts: Optional[list] = None,
+        request_id: Optional[str] = None,
     ) -> Tuple[Optional[str], TokenUsage]:
         """
         Generate a response from the LLM.
@@ -41,6 +42,7 @@ class LLMProvider(ABC):
             question: The user's question/prompt
             context_string: System context/instructions
             media_parts: Optional list of media (images, etc.)
+            request_id: Optional queue/request identifier for logs
 
         Returns:
             Tuple of (response_text, token_usage) where response_text may be None if generation failed
@@ -49,13 +51,14 @@ class LLMProvider(ABC):
 
     @abstractmethod
     async def summarize_messages(
-        self, serialized_messages: str
+        self, serialized_messages: str, request_id: Optional[str] = None
     ) -> Tuple[Optional[str], TokenUsage]:
         """
         Summarize a set of messages.
 
         Args:
             serialized_messages: Serialized message history
+            request_id: Optional queue/request identifier for logs
 
         Returns:
             Tuple of (summary_text, token_usage) where summary_text may be None if summarization failed
@@ -67,6 +70,7 @@ class LLMProvider(ABC):
         self,
         prompt: str,
         image_parts: Optional[list] = None,
+        request_id: Optional[str] = None,
     ) -> tuple[Optional[str], Optional[bytes]]:
         """
         Generate an image (and optional descriptive text).
@@ -74,6 +78,7 @@ class LLMProvider(ABC):
         Args:
             prompt: Prompt text for image generation
             image_parts: Optional list of PIL Images as references
+            request_id: Optional queue/request identifier for logs
 
         Returns:
             (description_text, image_bytes_png) where either may be None on failure

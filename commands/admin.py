@@ -1,7 +1,6 @@
 """Admin commands for Frozbot (owner-only)."""
 
-import asyncio
-import os
+import logging
 from typing import Optional
 
 import discord
@@ -10,6 +9,10 @@ from discord import app_commands
 import config
 from emoji import debug_guild_emoji_state, replace_guild_emojis_in_text
 from database import is_banned, add_banned_user, remove_banned_user
+from request_queue import clear_pending_requests, get_queue_snapshot
+from utils import format_duration_seconds
+
+logger = logging.getLogger(__name__)
 
 
 def setup_admin_commands(tree: app_commands.CommandTree, client: discord.Client):
@@ -30,14 +33,7 @@ def setup_admin_commands(tree: app_commands.CommandTree, client: discord.Client)
                 )
                 return
 
-            queue_size = config.REQUEST_QUEUE.qsize()
-
-            while not config.REQUEST_QUEUE.empty():
-                try:
-                    config.REQUEST_QUEUE.get_nowait()
-                    config.REQUEST_QUEUE.task_done()
-                except asyncio.QueueEmpty:
-                    break
+            queue_size = clear_pending_requests()
 
             await interaction.response.send_message(
                 f"🗑️ **Queue Cleared**\n\n"
@@ -49,6 +45,36 @@ def setup_admin_commands(tree: app_commands.CommandTree, client: discord.Client)
         except Exception as e:
             await interaction.response.send_message(
                 f"❌ **Error clearing queue**\n\nAn error occurred: {str(e)[:200]}...",
+                ephemeral=True,
+            )
+
+    @tree.command(
+        name="queuestatus",
+        description="[Owner Only] View backend request queue status.",
+        guild=None,
+    )
+    async def queue_status_command(interaction: discord.Interaction) -> None:
+        """Show backend queue status (owner only)."""
+        try:
+            if not config.is_owner(interaction.user.id):
+                await interaction.response.send_message(
+                    "❌ **Access Denied**\n\nOnly the bot owner can view queue status.",
+                    ephemeral=True,
+                )
+                return
+
+            snapshot = get_queue_snapshot()
+            await interaction.response.send_message(
+                "📋 **Backend Queue Status**\n\n"
+                f"**Active:** {snapshot['active_count']}\n"
+                f"**Waiting:** {snapshot['pending_count']}\n"
+                f"**Workers:** {snapshot['worker_count']}/{snapshot['max_concurrent_requests']}\n"
+                f"**Average Processing:** {snapshot['average_processing_seconds']} seconds\n",
+                ephemeral=True,
+            )
+        except Exception as e:
+            await interaction.response.send_message(
+                f"❌ **Error checking queue status**\n\nAn error occurred: {str(e)[:200]}...",
                 ephemeral=True,
             )
 
@@ -206,8 +232,8 @@ def setup_admin_commands(tree: app_commands.CommandTree, client: discord.Client)
                 f"**Message History Limit:** {config.MESSAGE_HISTORY_LIMIT} messages\n"
             )
             config_info += f"**Message History Search Depth:** {config.MESSAGE_HISTORY_SEARCH_DEPTH} messages\n"
-            config_info += f"**Ask Command Cooldown:** {config.ASK_COMMAND_COOLDOWN_MINUTES} minutes\n"
-            config_info += f"**Imagine Command Cooldown:** {config.IMAGINE_COMMAND_COOLDOWN_MINUTES} minutes\n"
+            config_info += f"**Ask Command Cooldown:** {format_duration_seconds(config.ASK_COMMAND_COOLDOWN_SECONDS)}\n"
+            config_info += f"**Imagine Command Cooldown:** {format_duration_seconds(config.IMAGINE_COMMAND_COOLDOWN_SECONDS)}\n"
             config_info += (
                 f"**Max Stored Questions:** {config.MAX_STORED_QUESTIONS} questions\n\n"
             )
@@ -276,7 +302,7 @@ def setup_admin_commands(tree: app_commands.CommandTree, client: discord.Client)
             debug_info = await debug_guild_emoji_state(guild)
 
             test_text = "Testing emoji replacement: :test: :smile: :cool:"
-            print(f"[TEST] Testing emoji replacement with: {test_text}")
+            logger.info("debug_emojis_test_started")
 
             replaced_text = await replace_guild_emojis_in_text(test_text, guild)
 
@@ -458,8 +484,9 @@ def setup_admin_commands(tree: app_commands.CommandTree, client: discord.Client)
                     "You don't have permission to use this command.", ephemeral=True
                 )
             except discord.errors.NotFound:
-                print(
-                    "Interaction not found when sending permission error for refresh command"
+                logger.warning(
+                    "refresh_permission_interaction_not_found",
+                    extra={"user_id": interaction.user.id},
                 )
                 return
             return
@@ -479,8 +506,9 @@ def setup_admin_commands(tree: app_commands.CommandTree, client: discord.Client)
                         ephemeral=True,
                     )
                 except discord.errors.NotFound:
-                    print(
-                        "Interaction not found when sending guild refresh success message"
+                    logger.warning(
+                        "refresh_guild_success_interaction_not_found",
+                        extra={"guild_id": config.GUILD_ID_ENV},
                     )
                     return
             else:
@@ -492,12 +520,15 @@ def setup_admin_commands(tree: app_commands.CommandTree, client: discord.Client)
                         ephemeral=True,
                     )
                 except discord.errors.NotFound:
-                    print(
-                        "Interaction not found when sending global refresh success message"
+                    logger.warning(
+                        "refresh_global_success_interaction_not_found",
                     )
                     return
         except discord.errors.NotFound:
-            print("Interaction not found when deferring refresh command")
+            logger.warning(
+                "refresh_defer_interaction_not_found",
+                extra={"user_id": interaction.user.id},
+            )
             return
 
         except Exception as e:
@@ -506,5 +537,8 @@ def setup_admin_commands(tree: app_commands.CommandTree, client: discord.Client)
                     f"Failed to refresh commands: {e}", ephemeral=True
                 )
             except discord.errors.NotFound:
-                print("Interaction not found when sending refresh error message")
+                logger.warning(
+                    "refresh_error_interaction_not_found",
+                    extra={"error_type": type(e).__name__},
+                )
                 return

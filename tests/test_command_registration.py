@@ -69,6 +69,21 @@ class CommandRegistrationTests(unittest.TestCase):
         self.assertNotIn("tts", [param.name for param in say_command.parameters])
         self.assertIsNotNone(summarize_command)
 
+    def test_public_queue_commands_are_not_registered(self):
+        from commands import setup_all_commands
+
+        self.config.ASK_ENABLE = True
+        self.config.IMAGINE_ENABLE = False
+        self.config.ELEVENLABS_API_KEY = None
+
+        client, tree = self._build_tree()
+        setup_all_commands(tree, client)
+
+        self.assertIsNone(tree.get_command("queue"))
+        self.assertIsNone(tree.get_command("cancelrequest"))
+        self.assertIsNotNone(tree.get_command("queuestatus"))
+        self.assertIsNotNone(tree.get_command("clearqueue"))
+
 
 if __name__ == "__main__":
     unittest.main()

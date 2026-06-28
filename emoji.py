@@ -1,5 +1,6 @@
 """Emoji handling functions for Frozbot."""
 
+import logging
 import re
 from typing import Dict, Any, Optional
 
@@ -7,13 +8,11 @@ import discord
 
 EMOJI_NAME_PATTERN = r"[A-Za-z0-9_]{2,32}"
 GUILD_EMOJI_TOKEN_RE = re.compile(rf"(?<!<)(?<!<a)\\?:({EMOJI_NAME_PATTERN})\\?:")
+logger = logging.getLogger(__name__)
 
 
 def _log(message: str) -> None:
-    try:
-        print(message)
-    except UnicodeEncodeError:
-        print(message.encode("ascii", "backslashreplace").decode("ascii"))
+    logger.debug("emoji_debug", extra={"detail": message[:300]})
 
 
 async def debug_guild_emoji_state(guild: Optional[discord.Guild]) -> str:
@@ -200,9 +199,10 @@ async def replace_guild_emojis_in_text(
 
     except Exception as e:
         _log(f"[ERROR] Unexpected error in replace_guild_emojis_in_text: {e}")
-        import traceback
-
-        traceback.print_exc()
+        logger.exception(
+            "emoji_replacement_unexpected_error",
+            extra={"error_type": type(e).__name__},
+        )
         return text
 
 
@@ -216,46 +216,80 @@ async def list_guild_emoji_names(
     names: list[str] = []
     try:
         if guild is None:
-            print("⚠️ No guild provided to list_guild_emoji_names")
+            logger.warning("emoji_list_no_guild")
             return names
 
         # Validate guild object
         if not hasattr(guild, "id") or not hasattr(guild, "emojis"):
-            print(f"⚠️ Invalid guild object in list_guild_emoji_names: {type(guild)}")
+            logger.warning(
+                "emoji_list_invalid_guild",
+                extra={"guild_type": type(guild).__name__},
+            )
             return names
 
-        print(f"🔍 Listing emojis for guild {guild.id}")
+        logger.debug("emoji_list_started", extra={"guild_id": guild.id})
 
         # Prefer cached list first
         cached_emojis = getattr(guild, "emojis", [])
-        print(f"[DEBUG] Found {len(cached_emojis)} cached emojis")
+        logger.debug(
+            "emoji_cached_count",
+            extra={"guild_id": guild.id, "emoji_count": len(cached_emojis)},
+        )
 
         for e in cached_emojis:
             try:
                 if hasattr(e, "name") and e.name:
                     names.append(str(e.name))
-                    print(f"  ✅ Cached emoji: :{e.name}:")
+                    logger.debug(
+                        "emoji_cached_name",
+                        extra={"guild_id": guild.id, "emoji_name": e.name},
+                    )
             except Exception as emoji_error:
-                print(f"  ❌ Error processing cached emoji: {emoji_error}")
+                logger.debug(
+                    "emoji_cached_processing_error",
+                    extra={
+                        "guild_id": guild.id,
+                        "error_type": type(emoji_error).__name__,
+                    },
+                )
                 continue
 
         # If empty, try fetching
         if not names:
-            print("🔄 No cached emojis found, attempting to fetch...")
+            logger.debug("emoji_fetch_started", extra={"guild_id": guild.id})
             try:
                 fetched = await guild.fetch_emojis()
-                print(f"📥 Fetched {len(fetched)} emojis from guild {guild.id}")
+                logger.debug(
+                    "emoji_fetch_completed",
+                    extra={"guild_id": guild.id, "emoji_count": len(fetched)},
+                )
 
                 for e in fetched:
                     try:
                         if hasattr(e, "name") and e.name:
                             names.append(str(e.name))
-                            print(f"  ✅ Fetched emoji: :{e.name}:")
+                            logger.debug(
+                                "emoji_fetched_name",
+                                extra={"guild_id": guild.id, "emoji_name": e.name},
+                            )
                     except Exception as emoji_error:
-                        print(f"  ❌ Error processing fetched emoji: {emoji_error}")
+                        logger.debug(
+                            "emoji_fetched_processing_error",
+                            extra={
+                                "guild_id": guild.id,
+                                "error_type": type(emoji_error).__name__,
+                            },
+                        )
                         continue
             except Exception as fetch_error:
-                print(f"❌ Failed to fetch emojis from guild {guild.id}: {fetch_error}")
+                logger.warning(
+                    "emoji_fetch_failed",
+                    extra={
+                        "guild_id": guild.id,
+                        "error_type": type(fetch_error).__name__,
+                    },
+                    exc_info=True,
+                )
 
         # Deduplicate while preserving case on first occurrence
         seen_lower: set[str] = set()
@@ -271,16 +305,19 @@ async def list_guild_emoji_names(
 
         if isinstance(max_total, int) and max_total > 0 and len(deduped) > max_total:
             result = deduped[:max_total]
-            print(f"📊 Returning {len(result)} emojis (truncated from {len(deduped)})")
+            logger.debug(
+                "emoji_list_returning_truncated",
+                extra={"returned": len(result), "total": len(deduped)},
+            )
         else:
             result = deduped
-            print(f"📊 Returning {len(result)} emojis")
+            logger.debug("emoji_list_returning", extra={"returned": len(result)})
 
         return result
 
     except Exception as e:
-        print(f"❌ Unexpected error in list_guild_emoji_names: {e}")
-        import traceback
-
-        traceback.print_exc()
+        logger.exception(
+            "emoji_list_unexpected_error",
+            extra={"error_type": type(e).__name__},
+        )
         return []

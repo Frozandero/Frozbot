@@ -37,7 +37,10 @@ def provider_supports_image_generation() -> bool:
 
 
 async def generate_response_with_llm(
-    question: str, context_string: str, media_parts: Optional[list]
+    question: str,
+    context_string: str,
+    media_parts: Optional[list],
+    request_id: Optional[str] = None,
 ) -> Tuple[Optional[str], TokenUsage]:
     """
     Generate a response using the configured LLM provider.
@@ -54,11 +57,14 @@ async def generate_response_with_llm(
     if not provider:
         return None, TokenUsage()
 
-    return await provider.generate_response(question, context_string, media_parts)
+    return await provider.generate_response(
+        question, context_string, media_parts, request_id=request_id
+    )
 
 
 async def summarize_messages_with_llm(
     serialized_messages: str,
+    request_id: Optional[str] = None,
 ) -> Tuple[Optional[str], TokenUsage]:
     """
     Summarize a set of messages into 1–2 sentences using the configured LLM provider.
@@ -73,11 +79,13 @@ async def summarize_messages_with_llm(
     if not provider:
         return None, TokenUsage()
 
-    return await provider.summarize_messages(serialized_messages)
+    return await provider.summarize_messages(serialized_messages, request_id=request_id)
 
 
 async def generate_image_with_llm(
-    prompt: str, image_parts: Optional[list] = None
+    prompt: str,
+    image_parts: Optional[list] = None,
+    request_id: Optional[str] = None,
 ) -> Tuple[Optional[str], Optional[bytes]]:
     """
     Generate an image using the configured LLM provider (if supported).
@@ -93,4 +101,4 @@ async def generate_image_with_llm(
     if not provider or not provider.supports_image_generation():
         return None, None
 
-    return await provider.generate_image(prompt, image_parts)
+    return await provider.generate_image(prompt, image_parts, request_id=request_id)

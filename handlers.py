@@ -2,12 +2,12 @@
 
 import datetime
 import hashlib
-import io
+import logging
 from typing import Optional
 
 import discord
-from PIL import Image
 
+from attachments import ImageValidationError, read_validated_attachment
 import config
 from context import build_ask_context
 from database import is_banned
@@ -24,7 +24,9 @@ from retry import (
     load_retry_media,
     load_retry_record,
 )
-from utils import filter_profanity
+from utils import format_duration_seconds
+
+logger = logging.getLogger(__name__)
 
 
 def _stable_question_hash(question: str) -> str:
@@ -127,17 +129,19 @@ def setup_handlers(client: discord.Client, tree: discord.app_commands.CommandTre
             if user_id in config.ASK_COMMAND_COOLDOWNS:
                 last_used = config.ASK_COMMAND_COOLDOWNS[user_id]
                 time_diff = current_time - last_used
-                minutes_passed = time_diff.total_seconds() / 60
+                seconds_passed = time_diff.total_seconds()
 
-                if minutes_passed < config.ASK_COMMAND_COOLDOWN_MINUTES:
+                if seconds_passed < config.ASK_COMMAND_COOLDOWN_SECONDS:
                     remaining_seconds = int(
-                        (config.ASK_COMMAND_COOLDOWN_MINUTES * 60)
-                        - time_diff.total_seconds()
+                        config.ASK_COMMAND_COOLDOWN_SECONDS - seconds_passed
                     )
-                    remaining_minutes = remaining_seconds // 60
-                    remaining_secs = remaining_seconds % 60
-                    print(
-                        f"[RATELIMIT] Rate limited mention from {message.author.name} ({remaining_minutes}m {remaining_secs}s remaining)"
+                    logger.info(
+                        "mention_rate_limited",
+                        extra={
+                            "user_id": message.author.id,
+                            "remaining_seconds": remaining_seconds,
+                            "remaining": format_duration_seconds(remaining_seconds),
+                        },
                     )
                     return
 
@@ -150,8 +154,12 @@ def setup_handlers(client: discord.Client, tree: discord.app_commands.CommandTre
         if not question:
             return
 
-        print(
-            f"[MENTION] Received mention from {message.author.name}: {question[:50]}..."
+        logger.info(
+            "mention_received",
+            extra={
+                "user_id": message.author.id,
+                "channel_id": getattr(message.channel, "id", None),
+            },
         )
 
         # Show typing indicator while processing
@@ -160,15 +168,28 @@ def setup_handlers(client: discord.Client, tree: discord.app_commands.CommandTre
             media_parts: Optional[list] = None
             try:
                 for attachment in message.attachments:
-                    if attachment.content_type and attachment.content_type.startswith(
-                        "image/"
-                    ):
-                        image_bytes = await attachment.read()
-                        pil_img = Image.open(io.BytesIO(image_bytes))
+                    if attachment.content_type and attachment.content_type.startswith("image/"):
+                        pil_img = await read_validated_attachment(
+                            attachment,
+                            source_name="mention_attachment",
+                        )
                         media_parts = [pil_img]
                         break
+            except ImageValidationError as e:
+                await message.reply(f"❌ Invalid image attachment: {e}")
+                return
             except Exception as e:
-                print(f"Failed to process image attachment: {e}")
+                logger.exception(
+                    "mention_image_attachment_error",
+                    extra={
+                        "user_id": message.author.id,
+                        "error_type": type(e).__name__,
+                    },
+                )
+                await message.reply(
+                    "❌ Invalid image attachment: the image could not be processed."
+                )
+                return
 
             built_context = await build_ask_context(
                 client=client,
@@ -190,48 +211,63 @@ def setup_handlers(client: discord.Client, tree: discord.app_commands.CommandTre
                 media_parts=media_parts,
             )
 
-            print(f"[QUEUE] Message request {request_id} added to queue")
+            logger.info(
+                "mention_request_queued",
+                extra={
+                    "request_id": request_id,
+                    "user_id": message.author.id,
+                },
+            )
 
     @client.event
     async def on_ready() -> None:
         """Handle bot ready event."""
-        print(f"Logged in as {client.user} (ID: {client.user.id})")
-        print("Bot is ready! Starting command sync...")
+        logger.info(
+            "bot_ready",
+            extra={
+                "bot_user": str(client.user),
+                "bot_user_id": getattr(client.user, "id", None),
+            },
+        )
+        logger.info("command_sync_started")
         removed_retry_records = cleanup_expired_retry_records(
             config.RETRY_BUTTON_EXPIRE_MINUTES * 60
         )
         if removed_retry_records:
-            print(f"[CLEANUP] Removed {removed_retry_records} expired retry records")
+            logger.info(
+                "expired_retry_records_removed",
+                extra={"removed": removed_retry_records},
+            )
 
         # Remove disabled commands
         if not config.IMAGINE_ENABLE:
             tree.remove_command("imagine")
-            print(
-                "[DISABLED] Image generation is disabled - /imagine command will not be registered"
+            logger.info(
+                "imagine_command_registration_disabled",
+                extra={"imagine_enable": config.IMAGINE_ENABLE},
             )
 
         try:
             if config.GUILD_ID_ENV:
-                print(f"GUILD_ID_ENV is set to: {config.GUILD_ID_ENV}")
+                logger.info(
+                    "guild_command_sync_configured",
+                    extra={"guild_id": config.GUILD_ID_ENV},
+                )
                 test_guild = discord.Object(id=int(config.GUILD_ID_ENV))
 
-                print("Syncing guild commands only...")
                 await tree.sync(guild=test_guild)
-                print(f"Slash commands synced to guild {config.GUILD_ID_ENV}.")
-            else:
-                print("No GUILD_ID_ENV set, syncing globally only...")
-                await tree.sync()
-                print(
-                    "Slash commands synced globally (may take up to 1 hour to appear)."
+                logger.info(
+                    "guild_command_sync_completed",
+                    extra={"guild_id": config.GUILD_ID_ENV},
                 )
+            else:
+                logger.info("global_command_sync_started")
+                await tree.sync()
+                logger.info("global_command_sync_completed")
         except Exception as sync_error:
-            print(f"Failed to sync commands: {sync_error}")
-            print(f"Error type: {type(sync_error)}")
-            import traceback
-
-            traceback.print_exc()
-            print(
-                "Make sure your bot has the 'applications.commands' scope and proper permissions."
+            logger.exception(
+                "command_sync_failed",
+                extra={"error_type": type(sync_error).__name__},
             )
 
 
@@ -326,6 +362,7 @@ async def _handle_retry_button(
         # Mark as used and disable button.
         config.USED_RETRY_BUTTONS[custom_id] = datetime.datetime.now()
         await _disable_retry_button_message(interaction, custom_id)
+        await interaction.response.defer(ephemeral=True, thinking=True)
 
         request_id = await add_request_to_queue(
             RequestType.RETRY,
@@ -338,29 +375,36 @@ async def _handle_retry_button(
             tts=tts,
         )
 
-        queue_size = config.REQUEST_QUEUE.qsize()
-        filtered_question = filter_profanity(question)
-        await interaction.response.send_message(
-            f"🔄 **Retry queued**\n\n"
-            f"**Question:** {filtered_question}\n\n"
-            f"Your retry request has been added to the queue. "
-            f"There are currently {queue_size} request(s) waiting.",
-            ephemeral=True,
+        logger.info(
+            "retry_request_queued",
+            extra={
+                "request_id": request_id,
+                "user_id": button_user_id,
+            },
         )
-        print(f"[QUEUE] Retry request {request_id} added to queue")
 
     except (ValueError, IndexError) as e:
-        print(f"Error parsing retry button custom_id: {e}")
+        logger.warning(
+            "retry_button_parse_error",
+            extra={"custom_id": custom_id, "error_type": type(e).__name__},
+        )
         await interaction.response.send_message(
             "❌ An error occurred while processing the retry button.",
             ephemeral=True,
         )
     except Exception as e:
-        print(f"Unexpected error in retry button handler: {e}")
+        logger.exception(
+            "retry_button_unexpected_error",
+            extra={"custom_id": custom_id, "error_type": type(e).__name__},
+        )
         try:
-            await interaction.response.send_message(
-                "❌ An unexpected error occurred.", ephemeral=True
-            )
-        except:
+            if interaction.response.is_done():
+                await interaction.followup.send(
+                    "❌ An unexpected error occurred.", ephemeral=True
+                )
+            else:
+                await interaction.response.send_message(
+                    "❌ An unexpected error occurred.", ephemeral=True
+                )
+        except Exception:
             pass
-

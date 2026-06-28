@@ -44,7 +44,9 @@ Important optional environment:
 - `LLM_PROVIDER`, currently `gemini`, `mistral`, or `xai`
 - `ELEVENLABS_API_KEY` and `ELEVENLABS_VOICE_ID`
 - `ASK_ENABLE`, `IMAGINE_ENABLE`, `REQUIRE_EXPLICIT_MENTION`
-- cooldown, context-depth, and channel-summary variables in `config.env.example`
+- seconds-based cooldown, context-depth, and channel-summary variables in `config.env.example`
+- `ASK_COMMAND_COOLDOWN_SECONDS`, `IMAGINE_COMMAND_COOLDOWN_SECONDS`; deprecated `*_COOLDOWN_MINUTES` env vars are converted to seconds at startup and should not be used in new code
+- `REQUEST_DELAY_SECONDS`, `MAX_CONCURRENT_REQUESTS`, `LOG_LEVEL`, `MAX_IMAGE_ATTACHMENT_BYTES`, `MAX_IMAGE_PIXELS`, `ALLOWED_IMAGE_FORMATS`
 - `MISTRAL_TEXT_MODELS`, `MISTRAL_VISION_MODELS`, `MISTRAL_TIMEOUT_SECONDS`
 - `MISTRAL_IMAGE_AGENT_ID` for Mistral `/imagine` support through a Mistral image-generation agent
 
@@ -57,17 +59,19 @@ Important optional environment:
   - `summarize.py`: `/summarize`, recent channel conversation summaries using the shared summary helper.
   - `imagine.py`: `/imagine`, image generation, optional prompt reference images and mentioned-user avatars.
   - `memory.py`: `/setmemory`, `/getmemory`, `/deletememory`.
-  - `admin.py`: owner-only settings, queue/cache controls, bans, refresh, emoji debug.
-  - `misc.py`: `/iq`, `/queue`, `/say`.
+  - `admin.py`: owner-only settings, backend queue status/cleanup, cache controls, bans, refresh, emoji debug.
+  - `misc.py`: `/iq`, `/say`.
 - `handlers.py`: Discord events, retry-button interactions, mention-based chat, command sync on ready.
-- `context.py`: Shared context construction for `/ask`, mention chat, and `/summarize`; recent messages, channel summaries, user/member info, replied-message context, memories, and trusted/untrusted prompt sections.
-- `request_queue.py`: Priority-aware async request processing for ask/retry requests and response delivery.
+- `context.py`: Shared context construction for `/ask`, mention chat, and `/summarize`; recent messages with display name/username/user ID, channel summaries, user/member info, replied-message context, memories, and trusted/untrusted prompt sections.
+- `request_queue.py`: Backend-only priority-aware worker queue for ask/retry requests, UUID request IDs, worker concurrency, owner status/cleanup support, and response delivery. Do not expose queue position/status to normal users.
 - `llm.py`: Provider-neutral facade around the provider system.
 - `llm_providers/`: Provider abstraction, provider registry, and concrete Gemini/Mistral/xAI implementations.
+- `llm_providers/execution.py`: Shared executor, timeout, retry, and logging helper for blocking provider SDK calls.
+- `attachments.py`: Defensive image validation for Discord attachments and avatar bytes.
 - `emoji.py`: Guild custom emoji discovery, replacement, and debug output.
 - `eleven.py`: ElevenLabs TTS and FFmpeg conversion.
 - `retry.py`: Persistent retry records plus temporary persisted image files for retry buttons.
-- `database.py`: Synchronous SQLite helpers for bans and channel-scoped memories.
+- `database.py`: Synchronous SQLite helpers for bans and channel-scoped memories. User memories store stable Discord user IDs plus display names when available, with legacy username fallback.
 - `views.py`: Discord UI views, currently memory pagination.
 - `iq.py`: Pure deterministic entertainment IQ calculation.
 
@@ -84,7 +88,8 @@ Important optional environment:
 - Never call blocking SDK/network work directly on the event loop. Existing provider code uses executors around blocking clients.
 - Keep user-visible Discord messages within the 2000-character limit or use attachments/files when appropriate.
 - Keep owner-only commands guarded with `config.is_owner()`.
-- Keep memory behavior channel-scoped unless intentionally changing the data model.
+- Keep memory behavior channel-scoped. User-targeted memories should use stable Discord user IDs when available while preserving readable display names/usernames in LLM context.
+- Validate image inputs through `attachments.py` before model use; do not pass unverified attachment bytes directly to providers.
 - Avoid adding persistent state to globals unless it belongs in `config.py` and has a clear lifecycle.
 - Do not commit secrets, local databases, virtual environments, generated media, or generated agent artifacts.
 - Do not run the bot with `python bot.py` as a verification step unless the user explicitly wants a live run.

@@ -38,6 +38,27 @@ class ContextPromptBoundaryTests(unittest.TestCase):
         self.assertIn("[removed]", context_string)
         self.assertNotIn("t3rr0rist", context_string)
 
+    def test_channel_message_format_includes_stable_identity(self):
+        from context import format_channel_messages
+
+        formatted = format_channel_messages(
+            [
+                {
+                    "timestamp": "2026-06-28 12:00",
+                    "author": "Alice",
+                    "author_display_name": "Alice Display",
+                    "author_username": "alice",
+                    "author_id": 123,
+                    "content": "hello",
+                    "attachments": 0,
+                    "embeds": 0,
+                }
+            ],
+            10,
+        )
+
+        self.assertIn("Alice Display (@alice) [id:123]: hello", formatted)
+
 
 if __name__ == "__main__":
     unittest.main()

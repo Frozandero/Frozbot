@@ -1,6 +1,7 @@
 """Retry functionality for Frozbot - media, context, and record persistence."""
 
 import json
+import logging
 import os
 import re
 import time
@@ -9,6 +10,8 @@ from typing import Any, Optional
 from PIL import Image
 
 import config
+
+logger = logging.getLogger(__name__)
 
 
 _SAFE_RETRY_ID_RE = re.compile(r"^[A-Za-z0-9_-]+$")
@@ -203,7 +206,11 @@ def save_retry_record(
         os.replace(temp_path, record_path)
         return True
     except Exception as e:
-        print(f"[WARN] Failed to persist retry record {custom_id}: {e}")
+        logger.warning(
+            "retry_record_persist_failed",
+            extra={"custom_id": custom_id, "error_type": type(e).__name__},
+            exc_info=True,
+        )
         return False
 
 

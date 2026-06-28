@@ -2,8 +2,8 @@
 
 import asyncio
 import base64
-import concurrent.futures
 import io
+import logging
 import os
 from typing import Optional, Tuple
 
@@ -13,8 +13,11 @@ from google.genai import errors
 from google import genai
 
 from .base import LLMProvider, TokenUsage
+from .execution import run_blocking_provider_call
+from logging_utils import context_log_fields, text_log_fields, token_usage_log_fields
 
 URL_CONTEXT_TOOL = {"type": "url_context"}
+logger = logging.getLogger(__name__)
 
 DEFAULT_TEXT_IMAGE_MODEL_SPECS = [
     "gemini-3.5-flash:low",
@@ -110,6 +113,15 @@ def _extract_interaction_image_bytes(interaction) -> Optional[bytes]:
     return None
 
 
+def _is_retryable_gemini_error(exc: BaseException) -> bool:
+    return isinstance(exc, errors.APIError) and getattr(exc, "code", None) in {
+        500,
+        502,
+        503,
+        504,
+    }
+
+
 class GeminiProvider(LLMProvider):
     """Gemini AI provider implementation."""
 
@@ -150,6 +162,7 @@ class GeminiProvider(LLMProvider):
         question: str,
         context_string: str,
         media_parts: Optional[list] = None,
+        request_id: Optional[str] = None,
     ) -> Tuple[Optional[str], TokenUsage]:
         """
         Generate a response using Gemini with model fallback.
@@ -171,8 +184,19 @@ class GeminiProvider(LLMProvider):
 
         for i, (model_name, thinking_level) in enumerate(models_to_try):
             try:
-                print(
-                    f"[INFO] Trying model: {model_name} (attempt {i+1}/{len(models_to_try)})"
+                logger.info(
+                    "provider_model_attempt",
+                    extra={
+                        "request_id": request_id,
+                        "provider": self.provider_name,
+                        "model": model_name,
+                        "operation": "generate_response",
+                        "model_attempt": i + 1,
+                        "model_count": len(models_to_try),
+                        "media_parts": len(media_parts or []),
+                        **text_log_fields("question", question),
+                        **context_log_fields(context_string),
+                    },
                 )
 
                 def call_gemini_api():
@@ -188,120 +212,106 @@ class GeminiProvider(LLMProvider):
                         store=False,
                     )
 
-                loop = asyncio.get_event_loop()
-                with concurrent.futures.ThreadPoolExecutor() as executor:
-                    interaction = await asyncio.wait_for(
-                        loop.run_in_executor(executor, call_gemini_api),
-                        timeout=30.0,  # 30 second timeout
-                    )
-
-                print(f"[INFO] Success with model: {model_name}")
+                interaction = await run_blocking_provider_call(
+                    call_gemini_api,
+                    provider=self.provider_name,
+                    model=model_name,
+                    operation="generate_response",
+                    timeout=30.0,
+                    request_id=request_id,
+                    retries=1,
+                    is_retryable=_is_retryable_gemini_error,
+                )
 
                 token_usage = _extract_token_usage(interaction)
-                print(
-                    f"[INFO] Token usage: {token_usage.input_tokens} input, {token_usage.output_tokens} output (total: {token_usage.total_tokens})"
+                logger.info(
+                    "provider_model_succeeded",
+                    extra={
+                        "request_id": request_id,
+                        "provider": self.provider_name,
+                        "model": model_name,
+                        **token_usage_log_fields(token_usage),
+                    },
                 )
 
                 if getattr(interaction, "output_text", None):
                     return interaction.output_text, token_usage
                 else:
-                    print(
-                        f"[WARN] {model_name} returned interaction without output_text"
+                    logger.warning(
+                        "provider_model_missing_output_text",
+                        extra={
+                            "request_id": request_id,
+                            "provider": self.provider_name,
+                            "model": model_name,
+                            "interaction_type": type(interaction).__name__,
+                        },
                     )
-                    print(f"Interaction object type: {type(interaction)}")
                     continue
 
             except asyncio.TimeoutError:
-                print(f"[WARN] Timeout for {model_name}, trying next model...")
+                logger.warning(
+                    "provider_model_timeout",
+                    extra={
+                        "request_id": request_id,
+                        "provider": self.provider_name,
+                        "model": model_name,
+                    },
+                )
                 continue
             except errors.APIError as e:
                 if e.code == 429:
-                    print(f"[WARN] Quota exceeded for {model_name}, trying next model...")
+                    logger.warning(
+                        "provider_model_quota_exceeded",
+                        extra={
+                            "request_id": request_id,
+                            "provider": self.provider_name,
+                            "model": model_name,
+                            "status_code": e.code,
+                        },
+                    )
                     continue
-                elif e.code in [
-                    500,
-                    502,
-                    503,
-                    504,
-                ]:  # Server errors that might be temporary
-                    print(f"[INFO] Server error ({e.code}) for {model_name}, retrying...")
-                    # For server errors, try the same model again once
-                    try:
-                        print(f"[INFO] Retrying {model_name} after server error...")
-                        # Add a small delay before retry to avoid overwhelming the service
-                        await asyncio.sleep(1)
-
-                        def retry_gemini_api():
-                            return client.interactions.create(
-                                model=model_name,
-                                input=_build_interaction_input(question, media_parts),
-                                system_instruction=context_string,
-                                generation_config={
-                                    "thinking_level": thinking_level,
-                                    "temperature": 0.9,
-                                },
-                                tools=[URL_CONTEXT_TOOL],
-                                store=False,
-                            )
-
-                        loop = asyncio.get_event_loop()
-                        with concurrent.futures.ThreadPoolExecutor() as executor:
-                            interaction = await asyncio.wait_for(
-                                loop.run_in_executor(executor, retry_gemini_api),
-                                timeout=30.0,
-                            )
-                        print(f"[INFO] Success with {model_name} on retry")
-
-                        token_usage = _extract_token_usage(interaction)
-                        print(
-                            f"[INFO] Token usage: {token_usage.input_tokens} input, {token_usage.output_tokens} output (total: {token_usage.total_tokens})"
-                        )
-
-                        if getattr(interaction, "output_text", None):
-                            return interaction.output_text, token_usage
-                        else:
-                            print(
-                                f"[WARN] Warning: {model_name} retry returned interaction without output_text"
-                            )
-                            print(f"Interaction object type: {type(interaction)}")
-                            print(f"Interaction object attributes: {dir(interaction)}")
-                            continue
-                    except Exception as retry_error:
-                        print(
-                            f"[ERROR] Retry failed for {model_name}: {str(retry_error)[:100]}..."
-                        )
-                        continue
                 else:
-                    # Non-quota, non-server error, log and try next model
                     error_msg = e.message if e.message else str(e)
-                    print(
-                        f"[ERROR] Non-quota error with {model_name}: {error_msg[:100]}... (code: {e.code})"
+                    logger.error(
+                        "provider_model_api_error",
+                        extra={
+                            "request_id": request_id,
+                            "provider": self.provider_name,
+                            "model": model_name,
+                            "status_code": e.code,
+                            "error_message": error_msg[:200],
+                        },
                     )
                     continue
             except Exception as e:
-                print(f"[ERROR] Unexpected error with {model_name}: {str(e)[:100]}...")
-                # Log the full error for debugging
-                import traceback
-
-                print(f"Full error details for {model_name}:")
-                traceback.print_exc()
+                logger.exception(
+                    "provider_model_unexpected_error",
+                    extra={
+                        "request_id": request_id,
+                        "provider": self.provider_name,
+                        "model": model_name,
+                        "error_type": type(e).__name__,
+                    },
+                )
                 continue
 
         # All models failed
-        print("[ERROR] All models failed")
-        print(f"Failed to get response for question: {question[:100]}...")
-
-        # Log additional debugging information
-        print("[INFO] Debugging info:")
-        print(f"  - Total models attempted: {len(models_to_try)}")
-        print(f"  - Client initialized: {client is not None}")
-        if client:
-            print(f"  - Client type: {type(client)}")
+        logger.error(
+            "provider_all_models_failed",
+            extra={
+                "request_id": request_id,
+                "provider": self.provider_name,
+                "model_count": len(models_to_try),
+                "client_initialized": client is not None,
+                "client_type": type(client).__name__ if client else None,
+                **text_log_fields("question", question),
+            },
+        )
 
         return None, TokenUsage()
 
     async def summarize_messages(
-        self, serialized_messages: str
+        self, serialized_messages: str, request_id: Optional[str] = None
     ) -> Tuple[Optional[str], TokenUsage]:
         """
         Summarize a set of messages into 1–2 sentences using Gemini.
@@ -325,13 +335,25 @@ class GeminiProvider(LLMProvider):
             "\n\nMessages:\n" + serialized_messages
         )
         try:
-            return await self.generate_response(prompt, context_instr, None)
+            return await self.generate_response(
+                prompt, context_instr, None, request_id=request_id
+            )
         except Exception as e:
-            print(f"Error summarizing messages: {e}")
+            logger.exception(
+                "provider_summarize_messages_failed",
+                extra={
+                    "request_id": request_id,
+                    "provider": self.provider_name,
+                    "error_type": type(e).__name__,
+                },
+            )
             return None, TokenUsage()
 
     async def generate_image(
-        self, prompt: str, image_parts: Optional[list] = None
+        self,
+        prompt: str,
+        image_parts: Optional[list] = None,
+        request_id: Optional[str] = None,
     ) -> Tuple[Optional[str], Optional[bytes]]:
         """
         Generate an image (and optional descriptive text) using Gemini.
@@ -360,36 +382,73 @@ class GeminiProvider(LLMProvider):
                         store=False,
                     )
 
-                loop = asyncio.get_event_loop()
-                with concurrent.futures.ThreadPoolExecutor() as executor:
-                    interaction = await asyncio.wait_for(
-                        loop.run_in_executor(executor, call_gemini_image_api),
-                        timeout=60.0,
-                    )
+                interaction = await run_blocking_provider_call(
+                    call_gemini_image_api,
+                    provider=self.provider_name,
+                    model=model_name,
+                    operation="generate_image",
+                    timeout=60.0,
+                    request_id=request_id,
+                    retries=1,
+                    is_retryable=_is_retryable_gemini_error,
+                )
 
                 image_bytes = _extract_interaction_image_bytes(interaction)
                 if image_bytes:
                     return getattr(interaction, "output_text", None), image_bytes
 
-                print(
-                    f"[WARN] Image generation with {model_name} returned no output image."
+                logger.warning(
+                    "provider_image_missing_output",
+                    extra={
+                        "request_id": request_id,
+                        "provider": self.provider_name,
+                        "model": model_name,
+                    },
                 )
                 continue
 
             except asyncio.TimeoutError:
-                print(f"[WARN] Image generation timed out for {model_name}.")
+                logger.warning(
+                    "provider_image_timeout",
+                    extra={
+                        "request_id": request_id,
+                        "provider": self.provider_name,
+                        "model": model_name,
+                    },
+                )
                 continue
             except errors.APIError as e:
                 if e.code == 429:
-                    print(f"[WARN] Quota exceeded for {model_name}, trying next model...")
+                    logger.warning(
+                        "provider_image_quota_exceeded",
+                        extra={
+                            "request_id": request_id,
+                            "provider": self.provider_name,
+                            "model": model_name,
+                            "status_code": e.code,
+                        },
+                    )
                     continue
-                print(
-                    f"[ERROR] Image generation API error with {model_name} ({e.code}): {str(e)[:200]}..."
+                logger.error(
+                    "provider_image_api_error",
+                    extra={
+                        "request_id": request_id,
+                        "provider": self.provider_name,
+                        "model": model_name,
+                        "status_code": e.code,
+                        "error_message": str(e)[:200],
+                    },
                 )
                 continue
             except Exception as e:
-                print(
-                    f"[ERROR] Unexpected image generation error with {model_name}: {str(e)[:200]}..."
+                logger.exception(
+                    "provider_image_unexpected_error",
+                    extra={
+                        "request_id": request_id,
+                        "provider": self.provider_name,
+                        "model": model_name,
+                        "error_type": type(e).__name__,
+                    },
                 )
                 continue
 

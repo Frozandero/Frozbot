@@ -2,14 +2,18 @@
 
 import asyncio
 import base64
-import concurrent.futures
 import io
+import logging
 import os
 from typing import Any, Optional, Tuple
 
 from PIL import Image
 
 from .base import LLMProvider, TokenUsage
+from .execution import run_blocking_provider_call
+from logging_utils import context_log_fields, text_log_fields, token_usage_log_fields
+
+logger = logging.getLogger(__name__)
 
 try:
     from mistralai.client import Mistral as _MistralClient
@@ -177,6 +181,19 @@ def _to_png_bytes(image_bytes: bytes) -> bytes:
         return image_bytes
 
 
+def _is_retryable_mistral_error(exc: BaseException) -> bool:
+    status_code = (
+        _get_value(exc, "status_code")
+        or _get_value(exc, "code")
+        or _get_value(exc, "status")
+    )
+    try:
+        status_code = int(status_code)
+    except (TypeError, ValueError):
+        return False
+    return status_code in {500, 502, 503, 504}
+
+
 class MistralProvider(LLMProvider):
     """Mistral AI provider implementation."""
 
@@ -255,6 +272,7 @@ class MistralProvider(LLMProvider):
         question: str,
         context_string: str,
         media_parts: Optional[list] = None,
+        request_id: Optional[str] = None,
     ) -> Tuple[Optional[str], TokenUsage]:
         """
         Generate a response using Mistral chat completions.
@@ -280,9 +298,19 @@ class MistralProvider(LLMProvider):
 
         for i, model_name in enumerate(models_to_try):
             try:
-                print(
-                    f"[INFO] Trying Mistral model: {model_name} "
-                    f"(attempt {i+1}/{len(models_to_try)})"
+                logger.info(
+                    "provider_model_attempt",
+                    extra={
+                        "request_id": request_id,
+                        "provider": self.provider_name,
+                        "model": model_name,
+                        "operation": "generate_response",
+                        "model_attempt": i + 1,
+                        "model_count": len(models_to_try),
+                        "media_parts": len(media_parts or []),
+                        **text_log_fields("question", question),
+                        **context_log_fields(context_string),
+                    },
                 )
 
                 def call_mistral_api():
@@ -292,32 +320,59 @@ class MistralProvider(LLMProvider):
                         temperature=0.9,
                     )
 
-                loop = asyncio.get_event_loop()
-                with concurrent.futures.ThreadPoolExecutor() as executor:
-                    response = await asyncio.wait_for(
-                        loop.run_in_executor(executor, call_mistral_api),
-                        timeout=self.timeout_seconds,
-                    )
+                response = await run_blocking_provider_call(
+                    call_mistral_api,
+                    provider=self.provider_name,
+                    model=model_name,
+                    operation="generate_response",
+                    timeout=self.timeout_seconds,
+                    request_id=request_id,
+                    retries=1,
+                    is_retryable=_is_retryable_mistral_error,
+                )
 
                 token_usage = _extract_token_usage(response)
-                print(
-                    f"[INFO] Token usage: {token_usage.input_tokens} input, "
-                    f"{token_usage.output_tokens} output "
-                    f"(total: {token_usage.total_tokens})"
+                logger.info(
+                    "provider_model_token_usage",
+                    extra={
+                        "request_id": request_id,
+                        "provider": self.provider_name,
+                        "model": model_name,
+                        **token_usage_log_fields(token_usage),
+                    },
                 )
 
                 response_text = _extract_response_text(response)
                 if response_text:
-                    print(f"[INFO] Success with Mistral model: {model_name}")
+                    logger.info(
+                        "provider_model_succeeded",
+                        extra={
+                            "request_id": request_id,
+                            "provider": self.provider_name,
+                            "model": model_name,
+                        },
+                    )
                     return response_text, token_usage
 
-                print(
-                    f"[WARN] Mistral model {model_name} returned no response text"
+                logger.warning(
+                    "provider_model_missing_response_text",
+                    extra={
+                        "request_id": request_id,
+                        "provider": self.provider_name,
+                        "model": model_name,
+                    },
                 )
                 continue
 
             except asyncio.TimeoutError:
-                print(f"[WARN] Timeout for Mistral model {model_name}")
+                logger.warning(
+                    "provider_model_timeout",
+                    extra={
+                        "request_id": request_id,
+                        "provider": self.provider_name,
+                        "model": model_name,
+                    },
+                )
                 continue
             except Exception as e:
                 status_code = (
@@ -325,19 +380,33 @@ class MistralProvider(LLMProvider):
                     or _get_value(e, "code")
                     or _get_value(e, "status")
                 )
-                status_suffix = f" ({status_code})" if status_code else ""
-                print(
-                    f"[ERROR] Mistral model {model_name} failed"
-                    f"{status_suffix}: "
-                    f"{str(e)[:200]}..."
+                logger.error(
+                    "provider_model_failed",
+                    extra={
+                        "request_id": request_id,
+                        "provider": self.provider_name,
+                        "model": model_name,
+                        "status_code": status_code,
+                        "error_type": type(e).__name__,
+                        "error_message": str(e)[:200],
+                    },
+                    exc_info=True,
                 )
                 continue
 
-        print("[ERROR] All Mistral models failed")
+        logger.error(
+            "provider_all_models_failed",
+            extra={
+                "request_id": request_id,
+                "provider": self.provider_name,
+                "model_count": len(models_to_try),
+                **text_log_fields("question", question),
+            },
+        )
         return None, TokenUsage()
 
     async def summarize_messages(
-        self, serialized_messages: str
+        self, serialized_messages: str, request_id: Optional[str] = None
     ) -> Tuple[Optional[str], TokenUsage]:
         """
         Summarize a set of messages into 1-2 sentences using Mistral.
@@ -361,13 +430,25 @@ class MistralProvider(LLMProvider):
             "\n\nMessages:\n" + serialized_messages
         )
         try:
-            return await self.generate_response(prompt, context_instr, None)
+            return await self.generate_response(
+                prompt, context_instr, None, request_id=request_id
+            )
         except Exception as e:
-            print(f"Error summarizing messages with Mistral: {e}")
+            logger.exception(
+                "provider_summarize_messages_failed",
+                extra={
+                    "request_id": request_id,
+                    "provider": self.provider_name,
+                    "error_type": type(e).__name__,
+                },
+            )
             return None, TokenUsage()
 
     async def generate_image(
-        self, prompt: str, image_parts: Optional[list] = None
+        self,
+        prompt: str,
+        image_parts: Optional[list] = None,
+        request_id: Optional[str] = None,
     ) -> Tuple[Optional[str], Optional[bytes]]:
         """
         Generate an image through a configured Mistral image-generation agent.
@@ -380,16 +461,20 @@ class MistralProvider(LLMProvider):
             Tuple of (description_text, image_bytes_png) where either may be None.
         """
         if not self.supports_image_generation():
-            print(
-                "[WARN] Mistral image generation requires MISTRAL_IMAGE_AGENT_ID "
-                "for an agent with the image_generation tool enabled."
+            logger.warning(
+                "provider_image_agent_missing",
+                extra={"request_id": request_id, "provider": self.provider_name},
             )
             return None, None
 
         if image_parts:
-            print(
-                "[WARN] Mistral image generation agent does not use reference images. "
-                "Using text prompt only."
+            logger.warning(
+                "provider_image_reference_ignored",
+                extra={
+                    "request_id": request_id,
+                    "provider": self.provider_name,
+                    "media_parts": len(image_parts),
+                },
             )
 
         client = self._get_client()
@@ -402,37 +487,63 @@ class MistralProvider(LLMProvider):
                     store=False,
                 )
 
-            loop = asyncio.get_event_loop()
-            with concurrent.futures.ThreadPoolExecutor() as executor:
-                response = await asyncio.wait_for(
-                    loop.run_in_executor(executor, call_mistral_image_api),
-                    timeout=max(self.timeout_seconds, 120.0),
-                )
+            response = await run_blocking_provider_call(
+                call_mistral_image_api,
+                provider=self.provider_name,
+                model=self.image_agent_id,
+                operation="generate_image",
+                timeout=max(self.timeout_seconds, 120.0),
+                request_id=request_id,
+                retries=1,
+                is_retryable=_is_retryable_mistral_error,
+            )
 
             description, file_id = _extract_image_generation_outputs(response)
             if not file_id:
-                print("[WARN] Mistral image generation returned no file_id")
+                logger.warning(
+                    "provider_image_missing_file_id",
+                    extra={"request_id": request_id, "provider": self.provider_name},
+                )
                 return description, None
 
             def download_image_file():
                 return client.files.download(file_id=file_id)
 
-            with concurrent.futures.ThreadPoolExecutor() as executor:
-                downloaded_file = await asyncio.wait_for(
-                    loop.run_in_executor(executor, download_image_file),
-                    timeout=self.timeout_seconds,
-                )
+            downloaded_file = await run_blocking_provider_call(
+                download_image_file,
+                provider=self.provider_name,
+                model=self.image_agent_id,
+                operation="download_generated_image",
+                timeout=self.timeout_seconds,
+                request_id=request_id,
+                retries=1,
+                is_retryable=_is_retryable_mistral_error,
+            )
 
             image_bytes = _downloaded_file_to_bytes(downloaded_file)
             if not image_bytes:
-                print("[WARN] Mistral image file download returned no bytes")
+                logger.warning(
+                    "provider_image_download_empty",
+                    extra={"request_id": request_id, "provider": self.provider_name},
+                )
                 return description, None
 
             return description, _to_png_bytes(image_bytes)
 
         except asyncio.TimeoutError:
-            print("[WARN] Mistral image generation timed out")
+            logger.warning(
+                "provider_image_timeout",
+                extra={"request_id": request_id, "provider": self.provider_name},
+            )
             return None, None
         except Exception as e:
-            print(f"[ERROR] Mistral image generation error: {str(e)[:200]}...")
+            logger.exception(
+                "provider_image_failed",
+                extra={
+                    "request_id": request_id,
+                    "provider": self.provider_name,
+                    "error_type": type(e).__name__,
+                    "error_message": str(e)[:200],
+                },
+            )
             return None, None

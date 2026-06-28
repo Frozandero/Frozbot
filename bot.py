@@ -5,6 +5,8 @@ This is the main entry point for the bot. It initializes the Discord client,
 sets up commands from the modular command files, and starts the bot.
 """
 
+import logging
+
 import discord
 from discord import app_commands
 
@@ -12,6 +14,9 @@ import config
 from database import init_db
 from commands import setup_all_commands
 from handlers import setup_handlers
+from logging_utils import configure_logging
+
+logger = logging.getLogger(__name__)
 
 
 def create_bot() -> tuple[discord.Client, app_commands.CommandTree]:
@@ -31,6 +36,11 @@ def create_bot() -> tuple[discord.Client, app_commands.CommandTree]:
 
 def main() -> None:
     """Main entry point for Frozbot."""
+    configure_logging()
+
+    for warning in config.CONFIG_DEPRECATION_WARNINGS:
+        logger.warning("config_deprecated", extra={"warning": warning})
+
     # Check for required token
     if not config.TOKEN:
         raise RuntimeError(
@@ -51,7 +61,7 @@ def main() -> None:
     setup_handlers(client, tree)
 
     # Run the bot
-    print("Starting Frozbot...")
+    logger.info("bot_starting")
     client.run(config.TOKEN)
 
 

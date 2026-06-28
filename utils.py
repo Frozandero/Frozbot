@@ -83,9 +83,9 @@ def cleanup_expired_cooldowns() -> None:
 
     for user_id, last_used in config.ASK_COMMAND_COOLDOWNS.items():
         time_diff = current_time - last_used
-        minutes_passed = time_diff.total_seconds() / 60
+        seconds_passed = time_diff.total_seconds()
 
-        if minutes_passed >= config.ASK_COMMAND_COOLDOWN_MINUTES:
+        if seconds_passed >= config.ASK_COMMAND_COOLDOWN_SECONDS:
             expired_users.append(user_id)
 
     for user_id in expired_users:
@@ -102,8 +102,8 @@ def cleanup_imagine_expired_cooldowns() -> None:
 
     for user_id, last_used in config.IMAGINE_COMMAND_COOLDOWNS.items():
         time_diff = current_time - last_used
-        minutes_passed = time_diff.total_seconds() / 60
-        if minutes_passed >= config.IMAGINE_COMMAND_COOLDOWN_MINUTES:
+        seconds_passed = time_diff.total_seconds()
+        if seconds_passed >= config.IMAGINE_COMMAND_COOLDOWN_SECONDS:
             expired_users.append(user_id)
 
     for user_id in expired_users:
@@ -128,13 +128,13 @@ def store_user_question(
 
 
 def check_rate_limit(
-    user_id: int, cooldown_minutes: int, cooldowns_dict: dict
+    user_id: int, cooldown_seconds: int, cooldowns_dict: dict
 ) -> tuple[bool, int]:
     """
     Check if a user is rate limited.
 
     Returns:
-        Tuple of (is_rate_limited, remaining_minutes)
+        Tuple of (is_rate_limited, remaining_seconds)
     """
     if config.is_owner(user_id):
         return False, 0
@@ -144,13 +144,28 @@ def check_rate_limit(
     if user_id in cooldowns_dict:
         last_used = cooldowns_dict[user_id]
         time_diff = current_time - last_used
-        minutes_passed = time_diff.total_seconds() / 60
+        seconds_passed = time_diff.total_seconds()
 
-        if minutes_passed < cooldown_minutes:
-            remaining_minutes = int(cooldown_minutes - minutes_passed)
-            return True, remaining_minutes
+        if seconds_passed < cooldown_seconds:
+            remaining_seconds = int(cooldown_seconds - seconds_passed)
+            return True, remaining_seconds
 
     return False, 0
+
+
+def format_duration_seconds(seconds: int) -> str:
+    """Format a duration for user-facing Discord messages."""
+    seconds = max(0, int(seconds))
+    if seconds < 60:
+        return f"{seconds} second{'s' if seconds != 1 else ''}"
+
+    minutes, remaining_seconds = divmod(seconds, 60)
+    if remaining_seconds == 0:
+        return f"{minutes} minute{'s' if minutes != 1 else ''}"
+    return (
+        f"{minutes} minute{'s' if minutes != 1 else ''} "
+        f"{remaining_seconds} second{'s' if remaining_seconds != 1 else ''}"
+    )
 
 
 def truncate_text(text: str, max_length: int = 2000) -> str:

@@ -1,4 +1,5 @@
 import asyncio
+import logging
 import os
 import re
 import subprocess
@@ -10,6 +11,7 @@ from mdit_plain.renderer import RendererPlain
 
 ELEVEN_CLIENT = None
 VOICE_ID = None
+logger = logging.getLogger(__name__)
 
 
 def get_eleven_client() -> Optional[ElevenLabs]:
@@ -21,7 +23,10 @@ def get_eleven_client() -> Optional[ElevenLabs]:
         try:
             ELEVEN_CLIENT = ElevenLabs(api_key=api_key)
         except Exception as e:
-            print(f"Error initializing ElevenLabs client: {e}")
+            logger.exception(
+                "elevenlabs_client_init_failed",
+                extra={"error_type": type(e).__name__},
+            )
             return None
     return ELEVEN_CLIENT
 
@@ -39,7 +44,7 @@ def generate_tts(text: str) -> bytes:
     try:
         client = get_eleven_client()
         if not client:
-            print("ElevenLabs API key not configured")
+            logger.warning("elevenlabs_client_not_configured")
             return b""
         tts_bytes = client.text_to_speech.convert(
             text=cleanup_text_for_tts(text),
@@ -53,7 +58,10 @@ def generate_tts(text: str) -> bytes:
         return mp3_bytes_to_ogg(bstring)
 
     except Exception as e:
-        print(f"Error generating TTS: {e}")
+        logger.exception(
+            "elevenlabs_tts_failed",
+            extra={"error_type": type(e).__name__},
+        )
         return b""
 
 
@@ -110,16 +118,23 @@ def mp3_bytes_to_ogg(mp3_bytes: bytes) -> bytes:
 
     # Only log actual errors (non-zero return code)
     if process.returncode != 0:
-        print(
-            f"FFmpeg error (return code {process.returncode}): {err_bytes.decode('utf-8', errors='ignore')}"
+        logger.error(
+            "ffmpeg_conversion_failed",
+            extra={
+                "return_code": process.returncode,
+                "stderr": err_bytes.decode("utf-8", errors="ignore")[:500],
+            },
         )
         return b""
 
     # FFmpeg writes informational output to stderr, which is normal
     # Only print stderr in debug mode or if something seems wrong
     if not out_bytes and err_bytes:
-        print(
-            f"FFmpeg stderr (no output generated): {err_bytes.decode('utf-8', errors='ignore')}"
+        logger.warning(
+            "ffmpeg_conversion_no_output",
+            extra={
+                "stderr": err_bytes.decode("utf-8", errors="ignore")[:500],
+            },
         )
 
     return out_bytes

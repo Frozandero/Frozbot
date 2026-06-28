@@ -3,6 +3,7 @@
 import os
 import sqlite3
 from contextlib import contextmanager
+from typing import Optional
 
 
 DB_PATH = os.getenv("FROZBOT_DB_PATH", "database.db")
@@ -50,13 +51,58 @@ def init_db():
             CREATE TABLE IF NOT EXISTS memories (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 username TEXT,
+                user_id INTEGER,
+                display_name TEXT,
                 memory TEXT,
                 channel_id INTEGER,
                 created_at DATETIME DEFAULT CURRENT_TIMESTAMP
             )
         """
         )
+        _ensure_memory_columns(c)
 
+        conn.commit()
+
+
+def _ensure_memory_columns(cursor: sqlite3.Cursor) -> None:
+    """Add newer memory identity columns to older SQLite databases."""
+    cursor.execute("PRAGMA table_info(memories)")
+    columns = {row[1] for row in cursor.fetchall()}
+    if "user_id" not in columns:
+        cursor.execute("ALTER TABLE memories ADD COLUMN user_id INTEGER")
+    if "display_name" not in columns:
+        cursor.execute("ALTER TABLE memories ADD COLUMN display_name TEXT")
+    cursor.execute(
+        """
+        UPDATE memories
+        SET display_name = username
+        WHERE display_name IS NULL AND username IS NOT NULL AND username != '*'
+        """
+    )
+
+
+def _memory_label_expression() -> str:
+    return "COALESCE(NULLIF(display_name, ''), username)"
+
+
+def _backfill_memory_identity(
+    username: str,
+    channel_id: int,
+    user_id: Optional[int],
+    display_name: Optional[str],
+) -> None:
+    if not user_id or username == "*":
+        return
+    with connect_db() as conn:
+        c = conn.cursor()
+        c.execute(
+            """
+            UPDATE memories
+            SET user_id = ?, display_name = COALESCE(NULLIF(?, ''), display_name, username)
+            WHERE channel_id = ? AND user_id IS NULL AND username = ?
+            """,
+            (user_id, display_name, channel_id, username),
+        )
         conn.commit()
 
 
@@ -90,30 +136,52 @@ def get_banned_users() -> list[int]:
     return [user[0] for user in result]
 
 
-def add_memory(username: str, memory: str, channel_id: int):
+def add_memory(
+    username: str,
+    memory: str,
+    channel_id: int,
+    user_id: Optional[int] = None,
+    display_name: Optional[str] = None,
+):
+    _backfill_memory_identity(username, channel_id, user_id, display_name)
     with connect_db() as conn:
         c = conn.cursor()
         c.execute(
-            "INSERT INTO memories (username, memory, channel_id) VALUES (?, ?, ?)",
-            (username, memory, channel_id),
+            """
+            INSERT INTO memories (username, user_id, display_name, memory, channel_id)
+            VALUES (?, ?, ?, ?, ?)
+            """,
+            (username, user_id, display_name, memory, channel_id),
         )
         conn.commit()
 
 
 def get_memories_by_user(
-    username: str, channel_id: int, limit: int = 10, offset: int = 0
+    username: str,
+    channel_id: int,
+    limit: int = 10,
+    offset: int = 0,
+    user_id: Optional[int] = None,
 ) -> list[tuple[int, str, str]]:
     with connect_db() as conn:
         c = conn.cursor()
+        label = _memory_label_expression()
+        if user_id is not None:
+            where_clause = "(user_id = ? OR (user_id IS NULL AND username = ?))"
+            base_params = [user_id, username, channel_id]
+        else:
+            where_clause = "username = ?"
+            base_params = [username, channel_id]
+
         if limit == -1:
             c.execute(
-                "SELECT id, username, memory FROM memories WHERE username = ? AND channel_id = ? ORDER BY created_at DESC",
-                (username, channel_id),
+                f"SELECT id, {label}, memory FROM memories WHERE {where_clause} AND channel_id = ? ORDER BY created_at DESC",
+                base_params,
             )
         else:
             c.execute(
-                "SELECT id, username, memory FROM memories WHERE username = ? AND channel_id = ? ORDER BY created_at DESC LIMIT ? OFFSET ?",
-                (username, channel_id, limit, offset),
+                f"SELECT id, {label}, memory FROM memories WHERE {where_clause} AND channel_id = ? ORDER BY created_at DESC LIMIT ? OFFSET ?",
+                base_params + [limit, offset],
             )
         result = c.fetchall()
     return result
@@ -124,27 +192,40 @@ def get_memories(
 ) -> list[tuple[int, str, str]]:
     with connect_db() as conn:
         c = conn.cursor()
+        label = _memory_label_expression()
         if limit == -1:
             c.execute(
-                "SELECT id, username, memory FROM memories WHERE channel_id = ? ORDER BY created_at DESC",
+                f"SELECT id, {label}, memory FROM memories WHERE channel_id = ? ORDER BY created_at DESC",
                 (channel_id,),
             )
         else:
             c.execute(
-                "SELECT id, username, memory FROM memories WHERE channel_id = ? ORDER BY created_at DESC LIMIT ? OFFSET ?",
+                f"SELECT id, {label}, memory FROM memories WHERE channel_id = ? ORDER BY created_at DESC LIMIT ? OFFSET ?",
                 (channel_id, limit, offset),
             )
         result = c.fetchall()
     return result
 
 
-def count_memories_by_user(username: str, channel_id: int) -> int:
+def count_memories_by_user(
+    username: str, channel_id: int, user_id: Optional[int] = None
+) -> int:
     with connect_db() as conn:
         c = conn.cursor()
-        c.execute(
-            "SELECT COUNT(*) FROM memories WHERE username = ? AND channel_id = ?",
-            (username, channel_id),
-        )
+        if user_id is not None:
+            c.execute(
+                """
+                SELECT COUNT(*) FROM memories
+                WHERE (user_id = ? OR (user_id IS NULL AND username = ?))
+                AND channel_id = ?
+                """,
+                (user_id, username, channel_id),
+            )
+        else:
+            c.execute(
+                "SELECT COUNT(*) FROM memories WHERE username = ? AND channel_id = ?",
+                (username, channel_id),
+            )
         result = c.fetchone()
     return result[0] if result else 0
 
@@ -216,6 +297,73 @@ def get_memories_for_users(
             memories_by_user[username].append((memory_id, username, memory))
 
     return memories_by_user
+
+
+def get_memories_for_user_refs(
+    user_refs: list[dict],
+    channel_id: int,
+    limit: int = 10,
+) -> dict[str, list[tuple[int, str, str]]]:
+    """
+    Get memories for stable user references.
+
+    Each ref should contain:
+      - key: stable lookup key used by the caller
+      - user_id: Discord user ID when known
+      - username: current username for legacy fallback
+      - display_name: readable display name
+    """
+    if not user_refs:
+        return {}
+
+    memories_by_key: dict[str, list[tuple[int, str, str]]] = {}
+    label = _memory_label_expression()
+
+    with connect_db() as conn:
+        c = conn.cursor()
+        for ref in user_refs:
+            key = str(ref.get("key") or "")
+            if not key:
+                continue
+            user_id = ref.get("user_id")
+            username = str(ref.get("username") or "")
+            display_name = ref.get("display_name")
+            memories_by_key[key] = []
+
+            if user_id is not None:
+                c.execute(
+                    """
+                    UPDATE memories
+                    SET user_id = ?, display_name = COALESCE(NULLIF(?, ''), display_name, username)
+                    WHERE channel_id = ? AND user_id IS NULL AND username = ?
+                    """,
+                    (user_id, display_name, channel_id, username),
+                )
+                c.execute(
+                    f"""
+                    SELECT id, {label}, memory FROM memories
+                    WHERE channel_id = ?
+                    AND (user_id = ? OR (user_id IS NULL AND username = ?))
+                    ORDER BY created_at DESC
+                    """,
+                    (channel_id, user_id, username),
+                )
+            else:
+                c.execute(
+                    f"""
+                    SELECT id, {label}, memory FROM memories
+                    WHERE channel_id = ? AND username = ?
+                    ORDER BY created_at DESC
+                    """,
+                    (channel_id, username),
+                )
+
+            rows = c.fetchall()
+            memories_by_key[key] = rows if limit == -1 else rows[:limit]
+
+        conn.commit()
+
+    return memories_by_key
 
 
 def get_generic_memories(

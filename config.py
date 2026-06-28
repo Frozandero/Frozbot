@@ -47,10 +47,50 @@ REQUIRE_EXPLICIT_MENTION: bool = (
 )
 
 # Rate limiting settings
-ASK_COMMAND_COOLDOWN_MINUTES: int = int(os.getenv("ASK_COMMAND_COOLDOWN_MINUTES", "30"))
-IMAGINE_COMMAND_COOLDOWN_MINUTES: int = int(
-    os.getenv("IMAGINE_COMMAND_COOLDOWN_MINUTES", "15")
+CONFIG_DEPRECATION_WARNINGS: list[str] = []
+
+
+def _read_cooldown_seconds(
+    seconds_env: str,
+    deprecated_minutes_env: str,
+    default_seconds: int,
+) -> int:
+    """Read cooldown seconds with deprecated minute-based env compatibility."""
+    seconds_value = os.getenv(seconds_env)
+    minutes_value = os.getenv(deprecated_minutes_env)
+
+    if seconds_value is not None and seconds_value.strip():
+        if minutes_value is not None and minutes_value.strip():
+            CONFIG_DEPRECATION_WARNINGS.append(
+                f"{deprecated_minutes_env} is deprecated and ignored because {seconds_env} is set. "
+                f"Use {seconds_env} only."
+            )
+        return max(0, int(seconds_value))
+
+    if minutes_value is not None and minutes_value.strip():
+        converted_seconds = max(0, int(minutes_value) * 60)
+        CONFIG_DEPRECATION_WARNINGS.append(
+            f"{deprecated_minutes_env} is deprecated. Converted {minutes_value} minute(s) "
+            f"to {converted_seconds} seconds. Use {seconds_env} instead."
+        )
+        return converted_seconds
+
+    return default_seconds
+
+
+ASK_COMMAND_COOLDOWN_SECONDS: int = _read_cooldown_seconds(
+    "ASK_COMMAND_COOLDOWN_SECONDS",
+    "ASK_COMMAND_COOLDOWN_MINUTES",
+    30 * 60,
 )
+IMAGINE_COMMAND_COOLDOWN_SECONDS: int = _read_cooldown_seconds(
+    "IMAGINE_COMMAND_COOLDOWN_SECONDS",
+    "IMAGINE_COMMAND_COOLDOWN_MINUTES",
+    15 * 60,
+)
+# Backward-compatible aliases for older imports. New code should use seconds.
+ASK_COMMAND_COOLDOWN_MINUTES: int = ASK_COMMAND_COOLDOWN_SECONDS // 60
+IMAGINE_COMMAND_COOLDOWN_MINUTES: int = IMAGINE_COMMAND_COOLDOWN_SECONDS // 60
 RETRY_BUTTON_EXPIRE_MINUTES: int = int(os.getenv("RETRY_BUTTON_EXPIRE_MINUTES", "5"))
 RETRY_BUTTON_TTL_MINUTES: int = 60
 
@@ -72,9 +112,18 @@ CHANNEL_SUMMARY_ENABLE: bool = (
 CHANNEL_SUMMARY_TTL_MIN: int = int(os.getenv("CHANNEL_SUMMARY_TTL_MIN", "3"))
 
 # Queue settings
-REQUEST_DELAY_SECONDS: int = 2
-MAX_CONCURRENT_REQUESTS: int = 1
+REQUEST_DELAY_SECONDS: int = int(os.getenv("REQUEST_DELAY_SECONDS", "2"))
+MAX_CONCURRENT_REQUESTS: int = max(
+    1, int(os.getenv("MAX_CONCURRENT_REQUESTS", "1"))
+)
 MAX_STORED_QUESTIONS: int = 5
+
+# Image input validation
+MAX_IMAGE_ATTACHMENT_BYTES: int = int(
+    os.getenv("MAX_IMAGE_ATTACHMENT_BYTES", str(8 * 1024 * 1024))
+)
+MAX_IMAGE_PIXELS: int = int(os.getenv("MAX_IMAGE_PIXELS", "16000000"))
+ALLOWED_IMAGE_FORMATS: str = os.getenv("ALLOWED_IMAGE_FORMATS", "JPEG,PNG,WEBP,GIF")
 
 # ============================================================================
 # GLOBAL STATE (Mutable runtime state)

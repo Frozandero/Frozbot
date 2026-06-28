@@ -3,13 +3,19 @@
 import asyncio
 import datetime
 import io
+import logging
 import re
+import uuid
 from typing import Optional
 
 import discord
 from discord import app_commands
-from PIL import Image
 
+from attachments import (
+    ImageValidationError,
+    read_validated_attachment,
+    validate_image_bytes,
+)
 import config
 from database import is_banned
 from emoji import replace_guild_emojis_in_text
@@ -18,7 +24,13 @@ from llm import (
     get_llm_provider,
     provider_supports_image_generation,
 )
-from utils import filter_profanity, cleanup_imagine_expired_cooldowns
+from utils import (
+    cleanup_imagine_expired_cooldowns,
+    filter_profanity,
+    format_duration_seconds,
+)
+
+logger = logging.getLogger(__name__)
 
 
 def setup_imagine_commands(tree: app_commands.CommandTree, client: discord.Client):
@@ -43,12 +55,20 @@ def setup_imagine_commands(tree: app_commands.CommandTree, client: discord.Clien
             return
 
         user_id = interaction.user.id
+        request_id = str(uuid.uuid4())
 
         # Log request
         try:
             image_info = " (with image input)" if image else ""
-            print(
-                f"[IMAGINE] /imagine request from user {user_id}{image_info}: {prompt[:60]}..."
+            logger.info(
+                "imagine_request_received",
+                extra={
+                    "request_id": request_id,
+                    "user_id": user_id,
+                    "has_image": bool(image),
+                    "image_info": image_info,
+                    "prompt_chars": len(prompt),
+                },
             )
         except Exception:
             pass
@@ -58,17 +78,24 @@ def setup_imagine_commands(tree: app_commands.CommandTree, client: discord.Clien
             now = datetime.datetime.now()
             if user_id in config.IMAGINE_COMMAND_COOLDOWNS:
                 last_used = config.IMAGINE_COMMAND_COOLDOWNS[user_id]
-                minutes_passed = (now - last_used).total_seconds() / 60
-                if minutes_passed < config.IMAGINE_COMMAND_COOLDOWN_MINUTES:
+                seconds_passed = (now - last_used).total_seconds()
+                if seconds_passed < config.IMAGINE_COMMAND_COOLDOWN_SECONDS:
                     remaining = int(
-                        config.IMAGINE_COMMAND_COOLDOWN_MINUTES - minutes_passed
+                        config.IMAGINE_COMMAND_COOLDOWN_SECONDS - seconds_passed
                     )
-                    print(
-                        f"[RATELIMIT] /imagine rate-limited for user {user_id}. Remaining: {remaining} min"
+                    logger.info(
+                        "imagine_rate_limited",
+                        extra={
+                            "request_id": request_id,
+                            "user_id": user_id,
+                            "remaining_seconds": remaining,
+                        },
                     )
                     try:
                         await interaction.response.send_message(
-                            f"⏰ Rate limit: You can only generate images once every {config.IMAGINE_COMMAND_COOLDOWN_MINUTES} minutes. Please wait {remaining} more minutes.",
+                            f"⏰ Rate limit: You can only generate images once every "
+                            f"{format_duration_seconds(config.IMAGINE_COMMAND_COOLDOWN_SECONDS)}. "
+                            f"Please wait {format_duration_seconds(remaining)}.",
                             ephemeral=True,
                         )
                     except discord.errors.NotFound:
@@ -91,7 +118,10 @@ def setup_imagine_commands(tree: app_commands.CommandTree, client: discord.Clien
         # Check LLM provider (image generation requires provider support)
         provider = get_llm_provider()
         if not provider:
-            print("[ERROR] /imagine attempted but LLM provider is not configured")
+            logger.error(
+                "imagine_llm_provider_missing",
+                extra={"request_id": request_id, "user_id": user_id},
+            )
             try:
                 await interaction.response.send_message(
                     "The bot is not configured with an LLM provider. Please contact the server owner.",
@@ -105,8 +135,13 @@ def setup_imagine_commands(tree: app_commands.CommandTree, client: discord.Clien
             provider_name = getattr(
                 provider, "provider_name", provider.__class__.__name__
             )
-            print(
-                f"[ERROR] /imagine attempted but provider {provider_name} does not support image generation"
+            logger.error(
+                "imagine_provider_unsupported",
+                extra={
+                    "request_id": request_id,
+                    "user_id": user_id,
+                    "provider": provider_name,
+                },
             )
             try:
                 await interaction.response.send_message(
@@ -127,17 +162,41 @@ def setup_imagine_commands(tree: app_commands.CommandTree, client: discord.Clien
         # Process image input
         image_parts = []
         try:
-            if image and getattr(image, "content_type", "").startswith("image/"):
-                image_bytes = await image.read()
-                pil_img = Image.open(io.BytesIO(image_bytes))
-                if pil_img.mode != "RGB":
-                    pil_img = pil_img.convert("RGB")
-                image_parts.append(pil_img)
-                print(
-                    f"[IMAGE] Image input detected: {image.content_type}, size: {len(image_bytes)} bytes"
+            if image:
+                pil_img = await read_validated_attachment(
+                    image,
+                    source_name="imagine_attachment",
+                    request_id=request_id,
                 )
+                image_parts.append(pil_img)
+                logger.info(
+                    "imagine_image_input_attached",
+                    extra={
+                        "request_id": request_id,
+                        "user_id": user_id,
+                        "content_type": getattr(image, "content_type", None),
+                    },
+                )
+        except ImageValidationError as e:
+            await interaction.followup.send(
+                f"❌ **Invalid image attachment**\n\n{e}",
+                ephemeral=True,
+            )
+            return
         except Exception as e:
-            print(f"Failed to process image attachment: {e}")
+            logger.exception(
+                "imagine_image_attachment_error",
+                extra={
+                    "request_id": request_id,
+                    "user_id": user_id,
+                    "error_type": type(e).__name__,
+                },
+            )
+            await interaction.followup.send(
+                "❌ **Invalid image attachment**\n\nThe image could not be processed.",
+                ephemeral=True,
+            )
+            return
 
         # Extract mentioned users
         mention_pattern = r"<@!?(\d+)>"
@@ -159,32 +218,59 @@ def setup_imagine_commands(tree: app_commands.CommandTree, client: discord.Clien
 
                         # Add profile picture
                         if member.display_avatar:
-                            print(
-                                f"Adding profile picture for user {mentioned_user_id}"
-                            )
                             avatar_bytes = await member.display_avatar.read()
-                            avatar_img = Image.open(io.BytesIO(avatar_bytes))
-                            if avatar_img.mode != "RGB":
-                                avatar_img = avatar_img.convert("RGB")
+                            avatar_img = validate_image_bytes(
+                                avatar_bytes,
+                                source_name=f"avatar_{mentioned_user_id}",
+                                request_id=request_id,
+                            )
                             image_parts.append(avatar_img)
+                            logger.info(
+                                "imagine_mention_avatar_attached",
+                                extra={
+                                    "request_id": request_id,
+                                    "mentioned_user_id": mentioned_user_id,
+                                },
+                            )
+            except ImageValidationError as e:
+                logger.warning(
+                    "imagine_mention_avatar_invalid",
+                    extra={
+                        "request_id": request_id,
+                        "mentioned_user_id": user_id_str,
+                        "error_message": str(e),
+                    },
+                )
             except Exception as e:
-                print(f"Error processing user mention {user_id_str}: {e}")
+                logger.exception(
+                    "imagine_mention_processing_error",
+                    extra={
+                        "request_id": request_id,
+                        "mentioned_user_id": user_id_str,
+                        "error_type": type(e).__name__,
+                    },
+                )
 
         # Prepare content
         if image_parts:
             formatted_prompt = f"Do not use user ids; use display names. Based on the provided image(s), {processed_prompt}"
             prompt_for_llm = formatted_prompt
-            print(f"[IMAGE] Using image-to-image generation")
+            logger.info(
+                "imagine_using_image_to_image",
+                extra={"request_id": request_id, "image_count": len(image_parts)},
+            )
         else:
             formatted_prompt = (
                 f"Generate an image from the following prompt: {processed_prompt}"
             )
             prompt_for_llm = formatted_prompt
-            print(f"[IMAGE] Using text-to-image generation")
+            logger.info("imagine_using_text_to_image", extra={"request_id": request_id})
 
         try:
             description_text, image_bytes = await generate_image_with_llm(
-                prompt_for_llm, image_parts if image_parts else None
+                prompt_for_llm,
+                image_parts if image_parts else None,
+                request_id=request_id,
             )
 
             filtered_prompt = filter_profanity(prompt)
@@ -199,8 +285,12 @@ def setup_imagine_commands(tree: app_commands.CommandTree, client: discord.Clien
                             display_text, guild
                         )
                 except Exception as e:
-                    print(
-                        f"[WARN] Error during emoji replacement in imagine command: {e}"
+                    logger.exception(
+                        "imagine_emoji_replacement_error",
+                        extra={
+                            "request_id": request_id,
+                            "error_type": type(e).__name__,
+                        },
                     )
 
             # Build message
@@ -226,7 +316,13 @@ def setup_imagine_commands(tree: app_commands.CommandTree, client: discord.Clien
                             discord.File(input_img_buf, filename="input_reference.png"),
                         )
                     except Exception as e:
-                        print(f"[WARN] Failed to include input image as reference: {e}")
+                        logger.exception(
+                            "imagine_reference_attachment_failed",
+                            extra={
+                                "request_id": request_id,
+                                "error_type": type(e).__name__,
+                            },
+                        )
 
                 if len(content) > 2000:
                     content = content[:1997] + "..."
@@ -235,10 +331,22 @@ def setup_imagine_commands(tree: app_commands.CommandTree, client: discord.Clien
                 # Record cooldown
                 if not config.is_owner(user_id):
                     config.IMAGINE_COMMAND_COOLDOWNS[user_id] = datetime.datetime.now()
-                    print(f"[OK] /imagine success for user {user_id}; cooldown set")
+                    logger.info(
+                        "imagine_request_completed",
+                        extra={
+                            "request_id": request_id,
+                            "user_id": user_id,
+                            "cooldown_set": True,
+                        },
+                    )
                 else:
-                    print(
-                        f"[OK] /imagine success for owner {user_id}; cooldown bypassed"
+                    logger.info(
+                        "imagine_request_completed",
+                        extra={
+                            "request_id": request_id,
+                            "user_id": user_id,
+                            "cooldown_set": False,
+                        },
                     )
             else:
                 msg = (
@@ -248,18 +356,29 @@ def setup_imagine_commands(tree: app_commands.CommandTree, client: discord.Clien
                 if len(msg) > 2000:
                     msg = msg[:1997] + "..."
                 await interaction.followup.send(content=msg)
-                print(f"[WARN] /imagine returned no image for user {user_id}")
+                logger.warning(
+                    "imagine_request_no_image_returned",
+                    extra={"request_id": request_id, "user_id": user_id},
+                )
 
         except asyncio.TimeoutError:
             await interaction.followup.send(
                 "⏰ Image generation timed out. Please try again later.", ephemeral=True
             )
-            print(f"[TIMEOUT] /imagine timeout for user {user_id}: {prompt[:60]}...")
+            logger.warning(
+                "imagine_request_timeout",
+                extra={"request_id": request_id, "user_id": user_id},
+            )
         except Exception as e:
             await interaction.followup.send(
                 f"❌ Unexpected error during image generation: {str(e)[:180]}...",
                 ephemeral=True,
             )
-            print(
-                f"[ERROR] /imagine unexpected error for user {user_id}: {str(e)[:200]}..."
+            logger.exception(
+                "imagine_request_unexpected_error",
+                extra={
+                    "request_id": request_id,
+                    "user_id": user_id,
+                    "error_type": type(e).__name__,
+                },
             )

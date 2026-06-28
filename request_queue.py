@@ -1,9 +1,12 @@
 """Request queue system for Frozbot."""
 
 import asyncio
+from collections import deque
 import datetime
 import hashlib
 import io
+import logging
+import math
 import uuid
 from dataclasses import dataclass
 from enum import Enum
@@ -21,6 +24,17 @@ from retry import (
 )
 from llm import generate_response_with_llm
 from eleven import generate_tts_async
+from logging_utils import context_log_fields, text_log_fields, token_usage_log_fields
+
+logger = logging.getLogger(__name__)
+
+_DEFAULT_PROCESSING_SECONDS = 45.0
+_ACTIVE_REQUESTS: dict[str, "QueuedRequest"] = {}
+_PENDING_REQUESTS: dict[str, "QueuedRequest"] = {}
+_CANCELLED_REQUESTS: set[str] = set()
+_WORKER_TASKS: set[asyncio.Task] = set()
+_PROCESSING_DURATIONS: deque[float] = deque(maxlen=25)
+_WORKER_SEQUENCE = 0
 
 
 class RequestType(Enum):
@@ -45,6 +59,18 @@ class QueuedRequest:
     media_parts: Optional[list] = None
     tts: bool = False
     message: Optional[discord.Message] = None  # For message-based requests (mentions)
+    position_at_enqueue: int = 0
+    estimated_wait_seconds_at_enqueue: int = 0
+
+
+@dataclass
+class QueueCancelResult:
+    """Result of a queued-request cancellation attempt."""
+
+    cancelled: bool
+    reason: str
+    state: str
+    request_id: str
 
 
 def _build_queue_item(request: QueuedRequest) -> tuple[int, int, QueuedRequest]:
@@ -60,55 +86,300 @@ def _unpack_queue_item(item) -> QueuedRequest:
     return item
 
 
-async def process_request_queue() -> None:
-    """Process requests from the queue sequentially with delays."""
-    if config.QUEUE_PROCESSOR_RUNNING:
-        return
-
-    config.QUEUE_PROCESSOR_RUNNING = True
-    print("[START] Starting request queue processor...")
-
+def _queued_requests_in_order() -> list[QueuedRequest]:
+    """Return pending queue requests in priority order."""
     try:
-        while True:
-            queue_item = None
-            try:
-                # Get next request from queue
-                queue_item = await config.REQUEST_QUEUE.get()
-                try:
-                    request = _unpack_queue_item(queue_item)
-                    print(
-                        f"[PROCESS] Processing request {request.request_id} ({request.request_type.value}, priority {request.priority}) from user {request.user_id}"
-                    )
+        queue_items = sorted(list(config.REQUEST_QUEUE._queue))
+    except Exception:
+        queue_items = []
 
-                    # Process the request
-                    if request.request_type == RequestType.ASK:
-                        await process_ask_request(request)
-                    elif request.request_type == RequestType.RETRY:
-                        await process_retry_request(request)
-                finally:
-                    config.REQUEST_QUEUE.task_done()
-                    queue_item = None
+    requests: list[QueuedRequest] = []
+    for item in queue_items:
+        request = _unpack_queue_item(item)
+        if request.request_id in _CANCELLED_REQUESTS:
+            continue
+        if request.request_id not in _PENDING_REQUESTS:
+            continue
+        requests.append(request)
+    return requests
 
-                # Add delay between requests to avoid rate limiting
-                if not config.REQUEST_QUEUE.empty():
-                    print(
-                        f"[WAIT] Waiting {config.REQUEST_DELAY_SECONDS} seconds before next request..."
-                    )
-                    await asyncio.sleep(config.REQUEST_DELAY_SECONDS)
 
-            except asyncio.CancelledError:
-                print("[STOP] Request queue processor cancelled")
-                break
-            except Exception as e:
-                print(f"[ERROR] Error processing request: {e}")
+def _average_processing_seconds() -> float:
+    if not _PROCESSING_DURATIONS:
+        return _DEFAULT_PROCESSING_SECONDS
+    return sum(_PROCESSING_DURATIONS) / len(_PROCESSING_DURATIONS)
+
+
+def _estimate_wait_seconds_for_position(position: Optional[int]) -> int:
+    if not position or position <= 0:
+        return 0
+
+    worker_count = max(1, config.MAX_CONCURRENT_REQUESTS)
+    available_workers = max(0, worker_count - len(_ACTIVE_REQUESTS))
+    if position <= available_workers:
+        return 0
+
+    requests_ahead = position - available_workers
+    batches = math.ceil(requests_ahead / worker_count)
+    seconds = batches * (_average_processing_seconds() + config.REQUEST_DELAY_SECONDS)
+    return max(0, int(seconds))
+
+
+def get_request_status(request_id: str) -> dict:
+    """Return status for one queued request."""
+    if request_id in _ACTIVE_REQUESTS:
+        return {
+            "request_id": request_id,
+            "state": "active",
+            "position": 0,
+            "estimated_wait_seconds": 0,
+        }
+
+    if request_id in _CANCELLED_REQUESTS:
+        return {
+            "request_id": request_id,
+            "state": "cancelled",
+            "position": None,
+            "estimated_wait_seconds": None,
+        }
+
+    queued_requests = _queued_requests_in_order()
+    for index, request in enumerate(queued_requests, 1):
+        if request.request_id == request_id:
+            return {
+                "request_id": request_id,
+                "state": "queued",
+                "position": index,
+                "estimated_wait_seconds": _estimate_wait_seconds_for_position(index),
+            }
+
+    return {
+        "request_id": request_id,
+        "state": "unknown",
+        "position": None,
+        "estimated_wait_seconds": None,
+    }
+
+
+def format_wait_estimate(seconds: Optional[int]) -> str:
+    """Format wait seconds for Discord messages."""
+    if seconds is None:
+        return "unknown"
+    if seconds <= 0:
+        return "starting soon"
+    if seconds < 60:
+        return f"about {seconds} seconds"
+    minutes = max(1, round(seconds / 60))
+    return f"about {minutes} minute{'s' if minutes != 1 else ''}"
+
+
+def get_queue_snapshot(user_id: Optional[int] = None) -> dict:
+    """Return a user-safe queue status snapshot."""
+    queued_requests = _queued_requests_in_order()
+    user_requests = []
+    for index, request in enumerate(queued_requests, 1):
+        if user_id is not None and request.user_id != user_id:
+            continue
+        user_requests.append(
+            {
+                "request_id": request.request_id,
+                "type": request.request_type.value,
+                "position": index,
+                "estimated_wait_seconds": _estimate_wait_seconds_for_position(index),
+                "priority": request.priority,
+            }
+        )
+
+    return {
+        "pending_count": len(queued_requests),
+        "active_count": len(_ACTIVE_REQUESTS),
+        "worker_count": len(_WORKER_TASKS),
+        "max_concurrent_requests": config.MAX_CONCURRENT_REQUESTS,
+        "processor_running": config.QUEUE_PROCESSOR_RUNNING,
+        "average_processing_seconds": int(_average_processing_seconds()),
+        "estimated_wait_seconds_for_new_request": _estimate_wait_seconds_for_position(
+            len(queued_requests) + 1
+        ),
+        "user_requests": user_requests,
+        "active_request_ids": list(_ACTIVE_REQUESTS),
+    }
+
+
+def cancel_queued_request(
+    request_id: str, *, user_id: int, is_owner: bool = False
+) -> QueueCancelResult:
+    """Cancel a queued request before a worker starts it."""
+    requested_id = request_id
+    if request_id not in _PENDING_REQUESTS and request_id not in _ACTIVE_REQUESTS:
+        matches = [
+            pending_id
+            for pending_id, pending_request in _PENDING_REQUESTS.items()
+            if pending_id.startswith(request_id)
+            and (is_owner or pending_request.user_id == user_id)
+        ]
+        if len(matches) == 1:
+            request_id = matches[0]
+        elif len(matches) > 1:
+            return QueueCancelResult(False, "ambiguous request id", "queued", requested_id)
+
+    if request_id in _ACTIVE_REQUESTS:
+        return QueueCancelResult(False, "already active", "active", request_id)
+
+    request = _PENDING_REQUESTS.get(request_id)
+    if request is None:
+        state = "cancelled" if request_id in _CANCELLED_REQUESTS else "unknown"
+        return QueueCancelResult(False, "request not found", state, request_id)
+
+    if not is_owner and request.user_id != user_id:
+        return QueueCancelResult(False, "not your request", "queued", request_id)
+
+    _PENDING_REQUESTS.pop(request_id, None)
+    _CANCELLED_REQUESTS.add(request_id)
+    logger.info(
+        "queue_request_cancelled",
+        extra={
+            "request_id": request_id,
+            "request_type": request.request_type.value,
+            "user_id": request.user_id,
+            "cancelled_by": user_id,
+        },
+    )
+    return QueueCancelResult(True, "cancelled", "cancelled", request_id)
+
+
+def clear_pending_requests() -> int:
+    """Clear pending queue entries and return the number removed."""
+    removed = len(_PENDING_REQUESTS)
+    for request_id in list(_PENDING_REQUESTS):
+        _CANCELLED_REQUESTS.add(request_id)
+    _PENDING_REQUESTS.clear()
+
+    while True:
+        try:
+            config.REQUEST_QUEUE.get_nowait()
+            config.REQUEST_QUEUE.task_done()
+        except asyncio.QueueEmpty:
+            break
+        except ValueError:
+            break
+
+    logger.info("queue_pending_cleared", extra={"removed": removed})
+    return removed
+
+
+def _worker_task_done(task: asyncio.Task) -> None:
+    _WORKER_TASKS.discard(task)
+    config.QUEUE_PROCESSOR_RUNNING = bool(_WORKER_TASKS)
+    if task.cancelled():
+        return
+    error = task.exception()
+    if error:
+        logger.exception(
+            "queue_worker_exited_with_error",
+            exc_info=(type(error), error, error.__traceback__),
+        )
+
+
+def ensure_queue_workers() -> None:
+    """Start queue workers up to MAX_CONCURRENT_REQUESTS."""
+    global _WORKER_SEQUENCE
+    for task in list(_WORKER_TASKS):
+        if task.done():
+            _WORKER_TASKS.discard(task)
+
+    while len(_WORKER_TASKS) < config.MAX_CONCURRENT_REQUESTS:
+        _WORKER_SEQUENCE += 1
+        task = asyncio.create_task(_queue_worker(_WORKER_SEQUENCE))
+        task.add_done_callback(_worker_task_done)
+        _WORKER_TASKS.add(task)
+
+    config.QUEUE_PROCESSOR_RUNNING = bool(_WORKER_TASKS)
+
+
+async def _queue_worker(worker_id: int) -> None:
+    """Process queued requests until cancelled."""
+    logger.info("queue_worker_started", extra={"worker_id": worker_id})
+
+    while True:
+        queue_item = await config.REQUEST_QUEUE.get()
+        request: Optional[QueuedRequest] = None
+        started_at: Optional[datetime.datetime] = None
+        try:
+            request = _unpack_queue_item(queue_item)
+            if (
+                request.request_id in _CANCELLED_REQUESTS
+                or request.request_id not in _PENDING_REQUESTS
+            ):
+                logger.info(
+                    "queue_request_skipped",
+                    extra={
+                        "request_id": request.request_id,
+                        "worker_id": worker_id,
+                        "reason": "cancelled_or_removed",
+                    },
+                )
                 continue
-            finally:
-                if queue_item is not None:
-                    config.REQUEST_QUEUE.task_done()
 
-    finally:
-        config.QUEUE_PROCESSOR_RUNNING = False
-        print("[STOP] Request queue processor stopped")
+            _PENDING_REQUESTS.pop(request.request_id, None)
+            _ACTIVE_REQUESTS[request.request_id] = request
+            started_at = datetime.datetime.now()
+            queue_wait_seconds = int((started_at - request.timestamp).total_seconds())
+            logger.info(
+                "queue_request_started",
+                extra={
+                    "request_id": request.request_id,
+                    "worker_id": worker_id,
+                    "request_type": request.request_type.value,
+                    "priority": request.priority,
+                    "user_id": request.user_id,
+                    "queue_wait_seconds": queue_wait_seconds,
+                    **text_log_fields("question", request.question),
+                    **context_log_fields(request.context_string),
+                },
+            )
+
+            if request.request_type == RequestType.ASK:
+                await process_ask_request(request)
+            elif request.request_type == RequestType.RETRY:
+                await process_retry_request(request)
+        except asyncio.CancelledError:
+            logger.info("queue_worker_cancelled", extra={"worker_id": worker_id})
+            raise
+        except Exception as e:
+            logger.exception(
+                "queue_request_processing_error",
+                extra={
+                    "request_id": request.request_id if request else None,
+                    "worker_id": worker_id,
+                    "error_type": type(e).__name__,
+                },
+            )
+        finally:
+            if request:
+                _ACTIVE_REQUESTS.pop(request.request_id, None)
+                _CANCELLED_REQUESTS.discard(request.request_id)
+                if started_at:
+                    elapsed = (datetime.datetime.now() - started_at).total_seconds()
+                    _PROCESSING_DURATIONS.append(elapsed)
+                    logger.info(
+                        "queue_request_finished",
+                        extra={
+                            "request_id": request.request_id,
+                            "worker_id": worker_id,
+                            "elapsed_seconds": round(elapsed, 2),
+                        },
+                    )
+            config.REQUEST_QUEUE.task_done()
+
+        if not config.REQUEST_QUEUE.empty():
+            await asyncio.sleep(config.REQUEST_DELAY_SECONDS)
+
+
+async def process_request_queue() -> None:
+    """Start queue workers and wait for them. Kept for compatibility."""
+    ensure_queue_workers()
+    if _WORKER_TASKS:
+        await asyncio.gather(*_WORKER_TASKS)
 
 
 async def add_request_to_queue(
@@ -122,9 +393,7 @@ async def add_request_to_queue(
     tts: bool = False,
 ) -> str:
     """Add a request to the queue and start the processor if needed."""
-    request_id = (
-        f"{request_type.value}_{user_id}_{int(datetime.datetime.now().timestamp())}"
-    )
+    request_id = str(uuid.uuid4())
 
     request = QueuedRequest(
         request_id=request_id,
@@ -139,14 +408,25 @@ async def add_request_to_queue(
         tts=tts,
     )
 
+    _PENDING_REQUESTS[request_id] = request
     await config.REQUEST_QUEUE.put(_build_queue_item(request))
-    print(
-        f"[QUEUE] Added request {request_id} to queue (size: {config.REQUEST_QUEUE.qsize()}, priority: {priority})"
+    status = get_request_status(request_id)
+    request.position_at_enqueue = status["position"] or 0
+    request.estimated_wait_seconds_at_enqueue = status["estimated_wait_seconds"] or 0
+    logger.info(
+        "queue_request_added",
+        extra={
+            "request_id": request_id,
+            "request_type": request_type.value,
+            "queue_position": request.position_at_enqueue,
+            "estimated_wait_seconds": request.estimated_wait_seconds_at_enqueue,
+            "priority": priority,
+            "user_id": user_id,
+            "pending_count": len(_PENDING_REQUESTS),
+        },
     )
 
-    # Start the queue processor if it's not running
-    if not config.QUEUE_PROCESSOR_RUNNING:
-        asyncio.create_task(process_request_queue())
+    ensure_queue_workers()
 
     return request_id
 
@@ -161,9 +441,7 @@ async def add_message_request_to_queue(
     media_parts: Optional[list] = None,
 ) -> str:
     """Add a message-based request to the queue (for mention-based replies)."""
-    request_id = (
-        f"{request_type.value}_msg_{user_id}_{int(datetime.datetime.now().timestamp())}"
-    )
+    request_id = str(uuid.uuid4())
 
     request = QueuedRequest(
         request_id=request_id,
@@ -179,14 +457,25 @@ async def add_message_request_to_queue(
         message=message,
     )
 
+    _PENDING_REQUESTS[request_id] = request
     await config.REQUEST_QUEUE.put(_build_queue_item(request))
-    print(
-        f"[QUEUE] Added message request {request_id} to queue (size: {config.REQUEST_QUEUE.qsize()}, priority: {priority})"
+    status = get_request_status(request_id)
+    request.position_at_enqueue = status["position"] or 0
+    request.estimated_wait_seconds_at_enqueue = status["estimated_wait_seconds"] or 0
+    logger.info(
+        "queue_message_request_added",
+        extra={
+            "request_id": request_id,
+            "request_type": request_type.value,
+            "queue_position": request.position_at_enqueue,
+            "estimated_wait_seconds": request.estimated_wait_seconds_at_enqueue,
+            "priority": priority,
+            "user_id": user_id,
+            "pending_count": len(_PENDING_REQUESTS),
+        },
     )
 
-    # Start the queue processor if it's not running
-    if not config.QUEUE_PROCESSOR_RUNNING:
-        asyncio.create_task(process_request_queue())
+    ensure_queue_workers()
 
     return request_id
 
@@ -264,25 +553,36 @@ async def process_ask_request(request: QueuedRequest) -> None:
     is_message_request = request.message is not None
 
     try:
-        print(f"[ASK] Processing ask request: {request.question[:50]}...")
-        print(f"[CONTEXT] Context length: {len(request.context_string)} chars")
-        print(
-            f"[CONTEXT] Context preview (first 500 chars): {request.context_string[:500]}..."
+        logger.info(
+            "ask_request_processing",
+            extra={
+                "request_id": request.request_id,
+                "user_id": request.user_id,
+                "is_message_request": is_message_request,
+                **text_log_fields("question", request.question),
+                **context_log_fields(request.context_string),
+            },
         )
 
         # Try to get response from the configured LLM provider with fallback.
         response, token_usage = await asyncio.wait_for(
             generate_response_with_llm(
-                request.question, request.context_string, request.media_parts
+                request.question,
+                request.context_string,
+                request.media_parts,
+                request_id=request.request_id,
             ),
             timeout=60.0,
         )
 
         # Always log token usage after request completes
-        print(
-            f"[ASK] Token usage for request '{request.question[:50]}...': "
-            f"{token_usage.input_tokens} input, {token_usage.output_tokens} output "
-            f"(total: {token_usage.total_tokens})"
+        logger.info(
+            "ask_request_token_usage",
+            extra={
+                "request_id": request.request_id,
+                "user_id": request.user_id,
+                **token_usage_log_fields(token_usage),
+            },
         )
 
         if response:
@@ -303,8 +603,9 @@ async def process_ask_request(request: QueuedRequest) -> None:
                 if guild and hasattr(guild, "id") and hasattr(guild, "emojis"):
                     return await replace_guild_emojis_in_text(text, guild)
                 else:
-                    print(
-                        f"[WARN] Invalid guild object in ask request, skipping emoji replacement"
+                    logger.warning(
+                        "ask_request_invalid_guild_for_emoji_replacement",
+                        extra={"request_id": request.request_id},
                     )
                     return text
 
@@ -336,10 +637,16 @@ async def process_ask_request(request: QueuedRequest) -> None:
             # Generate TTS if requested (only for interaction-based requests)
             if request.tts and not is_message_request:
                 try:
-                    print(f"[TTS] Generating TTS for response...")
+                    logger.info(
+                        "ask_request_tts_started",
+                        extra={"request_id": request.request_id},
+                    )
                     tts_audio = await generate_tts_async(replaced_answer)
                     if not tts_audio:
-                        print(f"[ERROR] Failed to generate TTS")
+                        logger.error(
+                            "ask_request_tts_failed",
+                            extra={"request_id": request.request_id},
+                        )
                         return
                     tts_buf = io.BytesIO(tts_audio)
                     tts_file = discord.File(tts_buf, filename="response.ogg")
@@ -349,9 +656,18 @@ async def process_ask_request(request: QueuedRequest) -> None:
                     else:
                         files_param = [tts_file]
 
-                    print(f"[OK] TTS audio generated successfully")
+                    logger.info(
+                        "ask_request_tts_completed",
+                        extra={"request_id": request.request_id},
+                    )
                 except Exception as e:
-                    print(f"[ERROR] Failed to generate TTS: {e}")
+                    logger.exception(
+                        "ask_request_tts_error",
+                        extra={
+                            "request_id": request.request_id,
+                            "error_type": type(e).__name__,
+                        },
+                    )
 
             formatted_response = (
                 formatted_response
@@ -369,7 +685,10 @@ async def process_ask_request(request: QueuedRequest) -> None:
             else:
                 await request.interaction.followup.send(content=formatted_response)
 
-            print(f"[OK] Successfully processed ask request {request.request_id}")
+            logger.info(
+                "ask_request_completed",
+                extra={"request_id": request.request_id, "user_id": request.user_id},
+            )
         else:
             # All models failed
             filtered_question = filter_profanity(request.question)
@@ -388,13 +707,19 @@ async def process_ask_request(request: QueuedRequest) -> None:
 
             if is_message_request:
                 await request.message.reply(content=all_failed_msg)
-                print(f"[ERROR] All models failed for ask request {request.request_id}")
+                logger.error(
+                    "ask_request_all_models_failed",
+                    extra={"request_id": request.request_id, "user_id": request.user_id},
+                )
                 return
 
             await _create_retry_button_and_schedule_expiry(
                 request.interaction, request, all_failed_msg
             )
-            print(f"[ERROR] All models failed for ask request {request.request_id}")
+            logger.error(
+                "ask_request_all_models_failed",
+                extra={"request_id": request.request_id, "user_id": request.user_id},
+            )
 
     except asyncio.TimeoutError:
         filtered_question = filter_profanity(request.question)
@@ -406,13 +731,19 @@ async def process_ask_request(request: QueuedRequest) -> None:
 
         if is_message_request:
             await request.message.reply(content=timeout_msg)
-            print(f"[TIMEOUT] Timeout for ask request {request.request_id}")
+            logger.warning(
+                "ask_request_timeout",
+                extra={"request_id": request.request_id, "user_id": request.user_id},
+            )
             return
 
         await _create_retry_button_and_schedule_expiry(
             request.interaction, request, timeout_msg
         )
-        print(f"[TIMEOUT] Timeout for ask request {request.request_id}")
+        logger.warning(
+            "ask_request_timeout",
+            extra={"request_id": request.request_id, "user_id": request.user_id},
+        )
 
     except Exception as e:
         filtered_question = filter_profanity(request.question)
@@ -428,32 +759,60 @@ async def process_ask_request(request: QueuedRequest) -> None:
                 await request.message.reply(content=error_msg)
             except Exception:
                 pass
-            print(f"[ERROR] Error in ask request {request.request_id}: {e}")
+            logger.exception(
+                "ask_request_error",
+                extra={
+                    "request_id": request.request_id,
+                    "user_id": request.user_id,
+                    "error_type": type(e).__name__,
+                },
+            )
             return
 
         await _create_retry_button_and_schedule_expiry(
             request.interaction, request, error_msg
         )
-        print(f"[ERROR] Error in ask request {request.request_id}: {e}")
+        logger.exception(
+            "ask_request_error",
+            extra={
+                "request_id": request.request_id,
+                "user_id": request.user_id,
+                "error_type": type(e).__name__,
+            },
+        )
 
 
 async def process_retry_request(request: QueuedRequest) -> None:
     """Process a retry request from the queue."""
     try:
-        print(f"[RETRY] Processing retry request: {request.question[:50]}...")
+        logger.info(
+            "retry_request_processing",
+            extra={
+                "request_id": request.request_id,
+                "user_id": request.user_id,
+                **text_log_fields("question", request.question),
+                **context_log_fields(request.context_string),
+            },
+        )
 
         response, token_usage = await asyncio.wait_for(
             generate_response_with_llm(
-                request.question, request.context_string, request.media_parts
+                request.question,
+                request.context_string,
+                request.media_parts,
+                request_id=request.request_id,
             ),
             timeout=60.0,
         )
 
         # Always log token usage after request completes
-        print(
-            f"[RETRY] Token usage for request '{request.question[:50]}...': "
-            f"{token_usage.input_tokens} input, {token_usage.output_tokens} output "
-            f"(total: {token_usage.total_tokens})"
+        logger.info(
+            "retry_request_token_usage",
+            extra={
+                "request_id": request.request_id,
+                "user_id": request.user_id,
+                **token_usage_log_fields(token_usage),
+            },
         )
 
         if response:
@@ -462,8 +821,9 @@ async def process_retry_request(request: QueuedRequest) -> None:
             if guild and hasattr(guild, "id") and hasattr(guild, "emojis"):
                 replaced_answer = await replace_guild_emojis_in_text(response, guild)
             else:
-                print(
-                    f"[WARN] Invalid guild object in retry request, skipping emoji replacement"
+                logger.warning(
+                    "retry_request_invalid_guild_for_emoji_replacement",
+                    extra={"request_id": request.request_id},
                 )
                 replaced_answer = response
             formatted_response = (
@@ -489,10 +849,16 @@ async def process_retry_request(request: QueuedRequest) -> None:
             # Generate TTS if requested
             if request.tts:
                 try:
-                    print(f"[TTS] Generating TTS for retry response...")
+                    logger.info(
+                        "retry_request_tts_started",
+                        extra={"request_id": request.request_id},
+                    )
                     tts_audio = await generate_tts_async(replaced_answer)
                     if not tts_audio:
-                        print(f"[ERROR] Failed to generate TTS for retry")
+                        logger.error(
+                            "retry_request_tts_failed",
+                            extra={"request_id": request.request_id},
+                        )
                         return
                     tts_buf = io.BytesIO(tts_audio)
                     tts_file = discord.File(tts_buf, filename="response.ogg")
@@ -502,9 +868,18 @@ async def process_retry_request(request: QueuedRequest) -> None:
                     else:
                         files_param = [tts_file]
 
-                    print(f"[OK] TTS audio generated successfully for retry")
+                    logger.info(
+                        "retry_request_tts_completed",
+                        extra={"request_id": request.request_id},
+                    )
                 except Exception as e:
-                    print(f"[ERROR] Failed to generate TTS for retry: {e}")
+                    logger.exception(
+                        "retry_request_tts_error",
+                        extra={
+                            "request_id": request.request_id,
+                            "error_type": type(e).__name__,
+                        },
+                    )
 
             formatted_response = (
                 formatted_response
@@ -519,7 +894,10 @@ async def process_retry_request(request: QueuedRequest) -> None:
             else:
                 await request.interaction.followup.send(content=formatted_response)
 
-            print(f"[OK] Successfully processed retry request {request.request_id}")
+            logger.info(
+                "retry_request_completed",
+                extra={"request_id": request.request_id, "user_id": request.user_id},
+            )
         else:
             filtered_question = filter_profanity(request.question)
             await request.interaction.followup.send(
@@ -528,7 +906,10 @@ async def process_retry_request(request: QueuedRequest) -> None:
                 "**Question:** " + filtered_question,
                 ephemeral=True,
             )
-            print(f"[ERROR] All models failed for retry request {request.request_id}")
+            logger.error(
+                "retry_request_all_models_failed",
+                extra={"request_id": request.request_id, "user_id": request.user_id},
+            )
 
     except asyncio.TimeoutError:
         filtered_question = filter_profanity(request.question)
@@ -538,7 +919,10 @@ async def process_retry_request(request: QueuedRequest) -> None:
             f"**Question:** {filtered_question}",
             ephemeral=True,
         )
-        print(f"[TIMEOUT] Timeout for retry request {request.request_id}")
+        logger.warning(
+            "retry_request_timeout",
+            extra={"request_id": request.request_id, "user_id": request.user_id},
+        )
 
     except Exception as e:
         filtered_question = filter_profanity(request.question)
@@ -549,4 +933,11 @@ async def process_retry_request(request: QueuedRequest) -> None:
             f"**Error:** {str(e)[:200]}...",
             ephemeral=True,
         )
-        print(f"[ERROR] Error in retry request {request.request_id}: {e}")
+        logger.exception(
+            "retry_request_error",
+            extra={
+                "request_id": request.request_id,
+                "user_id": request.user_id,
+                "error_type": type(e).__name__,
+            },
+        )

@@ -1,6 +1,7 @@
 """Context building functions for Frozbot."""
 
 import datetime
+import logging
 import re
 from dataclasses import dataclass
 from typing import Any, Optional
@@ -8,9 +9,12 @@ from typing import Any, Optional
 import discord
 
 import config
-from database import get_generic_memories, get_memories_for_users
+from database import get_generic_memories, get_memories_for_user_refs
 from emoji import list_guild_emoji_names
+from logging_utils import token_usage_log_fields
 from utils import sanitize_system_prompt
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -73,6 +77,13 @@ async def get_recent_channel_messages(
                 continue
             other_messages.append(
                 {
+                    "author_id": getattr(message.author, "id", None),
+                    "author_username": getattr(message.author, "name", "Unknown"),
+                    "author_display_name": getattr(
+                        message.author,
+                        "display_name",
+                        getattr(message.author, "name", "Unknown"),
+                    ),
                     "author": getattr(
                         message.author,
                         "display_name",
@@ -85,7 +96,10 @@ async def get_recent_channel_messages(
                 }
             )
     except Exception as e:
-        print(f"Error fetching recent channel messages: {e}")
+        logger.exception(
+            "context_recent_channel_messages_failed",
+            extra={"error_type": type(e).__name__},
+        )
     return other_messages, self_messages
 
 
@@ -122,14 +136,16 @@ async def get_channel_messages_for_summary(
                 }
             )
     except Exception as e:
-        print(f"Error fetching channel messages for summary: {e}")
+        logger.exception(
+            "context_summary_messages_failed",
+            extra={"error_type": type(e).__name__},
+        )
     return collected, newest_id
 
 
 def fetch_channel_memories(
     channel_id: int,
-    sender_username: str,
-    mentioned_usernames: list[str],
+    user_refs: list[dict],
     memory_limit: int = 5,
 ) -> tuple[list[tuple[int, str, str]], dict[str, list[tuple[int, str, str]]]]:
     """
@@ -137,34 +153,22 @@ def fetch_channel_memories(
 
     Returns:
         - generic_memories: List of generic memories (username='*')
-        - user_memories: Dict mapping username -> list of memories for sender and mentioned users
+        - user_memories: Dict mapping stable user ref key -> list of memories
     """
     try:
         # Get generic memories for the channel
         generic_memories = get_generic_memories(channel_id, memory_limit)
 
-        # Collect all usernames that need memories (sender + mentioned users)
-        all_usernames = [sender_username]
-        if mentioned_usernames:
-            all_usernames.extend(mentioned_usernames)
-
-        # Remove duplicates while preserving order
-        unique_usernames = []
-        seen = set()
-        for username in all_usernames:
-            if username not in seen:
-                unique_usernames.append(username)
-                seen.add(username)
-
-        # Fetch memories for all users in one query
-        user_memories = get_memories_for_users(
-            unique_usernames, channel_id, memory_limit
-        )
+        unique_refs = _dedupe_user_refs(user_refs)
+        user_memories = get_memories_for_user_refs(unique_refs, channel_id, memory_limit)
 
         return generic_memories, user_memories
 
     except Exception as e:
-        print(f"Error fetching channel memories: {e}")
+        logger.exception(
+            "context_fetch_channel_memories_failed",
+            extra={"channel_id": channel_id, "error_type": type(e).__name__},
+        )
         return [], {}
 
 
@@ -195,6 +199,45 @@ def _dedupe_preserving_order(values: list[str]) -> list[str]:
             continue
         seen.add(value)
         deduped.append(value)
+    return deduped
+
+
+def _memory_key(user_id: Optional[int], username: Optional[str]) -> str:
+    if user_id is not None:
+        return f"id:{user_id}"
+    return f"username:{username or 'Unknown'}"
+
+
+def _user_ref(
+    user_id: Optional[int],
+    username: Optional[str],
+    display_name: Optional[str],
+) -> dict:
+    return {
+        "key": _memory_key(user_id, username),
+        "user_id": user_id,
+        "username": username or "Unknown",
+        "display_name": display_name or username or "Unknown",
+    }
+
+
+def _user_ref_from_context(user_data: dict) -> dict:
+    return _user_ref(
+        user_data.get("id"),
+        user_data.get("username"),
+        user_data.get("name") or user_data.get("display_name"),
+    )
+
+
+def _dedupe_user_refs(user_refs: list[dict]) -> list[dict]:
+    deduped = []
+    seen = set()
+    for ref in user_refs:
+        key = ref.get("key")
+        if not key or key in seen:
+            continue
+        seen.add(key)
+        deduped.append(ref)
     return deduped
 
 
@@ -274,10 +317,12 @@ async def get_or_refresh_channel_summary(
         _serialize_messages_for_summary(messages_for_summary, effective_depth)
     )
     channel_summary = summary or None
-    print(
-        f"[SUMMARY] Token usage for channel summary: "
-        f"{summary_token_usage.input_tokens} input, {summary_token_usage.output_tokens} output "
-        f"(total: {summary_token_usage.total_tokens})"
+    logger.info(
+        "channel_summary_token_usage",
+        extra={
+            "channel_id": channel_id,
+            **token_usage_log_fields(summary_token_usage),
+        },
     )
 
     if cache_allowed and isinstance(channel_id, int):
@@ -317,7 +362,10 @@ async def get_user_recent_messages(
             if len(messages) >= limit:
                 break
     except Exception as e:
-        print(f"Error fetching messages for user {user_id}: {e}")
+        logger.exception(
+            "context_user_recent_messages_failed",
+            extra={"user_id": user_id, "error_type": type(e).__name__},
+        )
     return messages
 
 
@@ -355,6 +403,7 @@ async def process_mentions_in_question(
 
                     mentioned_users_context.append(
                         {
+                            "id": member.id,
                             "name": member.display_name,
                             "username": member.name,
                             "joined_at": (
@@ -391,6 +440,7 @@ async def process_mentions_in_question(
 
                         mentioned_users_context.append(
                             {
+                                "id": user.id,
                                 "name": user.name,
                                 "username": user.name,
                                 "created_at": (
@@ -423,6 +473,7 @@ async def process_mentions_in_question(
 
                     mentioned_users_context.append(
                         {
+                            "id": user.id,
                             "name": user.name,
                             "username": user.name,
                             "created_at": (
@@ -494,24 +545,6 @@ async def build_ask_context(
             mentioned_users_context.append(author_context)
             mentioned_user_ids.add(replied_author_id)
 
-    sender_username = getattr(user, "name", "Unknown")
-    mentioned_usernames = [
-        u["username"] for u in mentioned_users_context if isinstance(u, dict)
-    ]
-    if replied_context and replied_author_id:
-        author_context = replied_context.get("author_context", {})
-        if author_context and "username" in author_context:
-            mentioned_usernames.append(author_context["username"])
-    mentioned_usernames = _dedupe_preserving_order(mentioned_usernames)
-
-    channel_id = getattr(channel, "id", 0)
-    generic_memories, user_memories = fetch_channel_memories(
-        channel_id, sender_username, mentioned_usernames, memory_limit=5
-    )
-
-    server_context = _format_server_context(guild, generic_memories)
-    date_context = datetime.datetime.now().strftime("%Y-%m-%d %H:%M")
-
     user_context = build_user_context(user)
     user_recent_messages = await get_user_recent_messages(channel, user.id)
     user_context["recent_messages"] = user_recent_messages
@@ -524,6 +557,27 @@ async def build_ask_context(
         self_bot_id=bot_id,
         max_self_messages=2,
     )
+
+    user_refs = [_user_ref_from_context(user_context)]
+    for user_data in mentioned_users_context:
+        if isinstance(user_data, dict):
+            user_refs.append(_user_ref_from_context(user_data))
+    for message in recent_channel_messages:
+        user_refs.append(
+            _user_ref(
+                message.get("author_id"),
+                message.get("author_username"),
+                message.get("author_display_name"),
+            )
+        )
+
+    channel_id = getattr(channel, "id", 0)
+    generic_memories, user_memories = fetch_channel_memories(
+        channel_id, user_refs, memory_limit=5
+    )
+
+    server_context = _format_server_context(guild, generic_memories)
+    date_context = datetime.datetime.now().strftime("%Y-%m-%d %H:%M")
 
     channel_raw_context_str = format_channel_messages(
         recent_channel_messages, config.CHANNEL_CONTEXT_LAST
@@ -542,6 +596,18 @@ async def build_ask_context(
         mentioned_users_context, user_memories
     )
     user_context_str = format_user_context(user_context, user_memories)
+    additional_user_memories_str = format_additional_user_memories(
+        user_refs,
+        user_memories,
+        excluded_keys={
+            _user_ref_from_context(user_context)["key"],
+            *[
+                _user_ref_from_context(u)["key"]
+                for u in mentioned_users_context
+                if isinstance(u, dict)
+            ],
+        },
+    )
 
     replied_message_str = None
     if replied_context:
@@ -569,6 +635,7 @@ async def build_ask_context(
         bot_previous_responses_str=bot_previous_responses_str,
         channel_summary_str=channel_summary_str,
         replied_message_str=replied_message_str,
+        additional_user_memories_str=additional_user_memories_str,
     )
 
     return BuiltAskContext(
@@ -581,6 +648,7 @@ async def build_ask_context(
 def build_user_context(user: discord.abc.User) -> dict:
     """Build context dict for a user."""
     user_context = {
+        "id": getattr(user, "id", None),
         "name": (user.display_name if hasattr(user, "display_name") else user.name),
         "username": user.name,
         "created_at": (
@@ -623,8 +691,11 @@ def format_mentioned_users_context(
         for user_data in mentioned_users_context:
             if isinstance(user_data, dict):
                 user_info_parts = []
+                identity = f"{user_data['name']} (@{user_data['username']})"
+                if user_data.get("id") is not None:
+                    identity += f" [id:{user_data['id']}]"
                 user_info_parts.append(
-                    f"- {user_data['name']} (@{user_data['username']})"
+                    f"- {identity}"
                 )
 
                 if "joined_at" in user_data:
@@ -659,15 +730,15 @@ def format_mentioned_users_context(
                     user_info_parts.append("  Recent Messages: None")
 
                 # Add memories for this user if available
-                mentioned_username = user_data.get("username", "")
+                memory_key = _user_ref_from_context(user_data)["key"]
                 if (
-                    mentioned_username
-                    and mentioned_username in user_memories
-                    and user_memories[mentioned_username]
+                    memory_key
+                    and memory_key in user_memories
+                    and user_memories[memory_key]
                 ):
                     user_info_parts.append("  Memories:")
                     for i, (memory_id, username, memory) in enumerate(
-                        user_memories[mentioned_username], 1
+                        user_memories[memory_key], 1
                     ):
                         user_info_parts.append(f"    {i}. {memory}")
                 else:
@@ -689,6 +760,8 @@ def format_user_context(user_context: dict, user_memories: dict) -> str:
     user_info_parts = []
     user_info_parts.append(f"Name: {user_context['name']}")
     user_info_parts.append(f"Username: @{user_context['username']}")
+    if user_context.get("id") is not None:
+        user_info_parts.append(f"User ID: {user_context['id']}")
     user_info_parts.append(f"Account Created: {user_context['created_at']}")
     user_info_parts.append(f"Bot: {user_context['bot']}")
 
@@ -718,21 +791,43 @@ def format_user_context(user_context: dict, user_memories: dict) -> str:
         user_info_parts.append("Recent Messages: None")
 
     # Add memories for this user if available
-    user_username = user_context.get("username", "")
+    memory_key = _user_ref_from_context(user_context)["key"]
     if (
-        user_username
-        and user_username in user_memories
-        and user_memories[user_username]
+        memory_key
+        and memory_key in user_memories
+        and user_memories[memory_key]
     ):
         user_info_parts.append("Memories:")
         for i, (memory_id, username, memory) in enumerate(
-            user_memories[user_username], 1
+            user_memories[memory_key], 1
         ):
             user_info_parts.append(f"  {i}. {memory}")
     else:
         user_info_parts.append("Memories: None")
 
     return "\n".join(user_info_parts)
+
+
+def format_additional_user_memories(
+    user_refs: list[dict],
+    user_memories: dict,
+    excluded_keys: set[str],
+) -> str:
+    """Format memories for recent channel participants not otherwise expanded."""
+    parts = []
+    for ref in _dedupe_user_refs(user_refs):
+        key = ref.get("key")
+        memories = user_memories.get(key) if key else None
+        if not key or key in excluded_keys or not memories:
+            continue
+        label = f"{ref.get('display_name', 'Unknown')} (@{ref.get('username', 'Unknown')})"
+        if ref.get("user_id") is not None:
+            label += f" [id:{ref['user_id']}]"
+        parts.append(f"- {label}:")
+        for i, (_memory_id, _username, memory) in enumerate(memories, 1):
+            parts.append(f"  {i}. {memory}")
+
+    return "\n".join(parts) if parts else "None"
 
 
 def format_channel_messages(messages: list, limit: int) -> str:
@@ -742,7 +837,14 @@ def format_channel_messages(messages: list, limit: int) -> str:
 
     formatted = []
     for i, msg in enumerate(messages[-limit:], 1):
-        msg_info = f"{i}. [{msg['timestamp']}] {msg['author']}: {msg['content']}"
+        author = msg.get("author_display_name") or msg.get("author") or "Unknown"
+        username = msg.get("author_username")
+        author_id = msg.get("author_id")
+        if username:
+            author += f" (@{username})"
+        if author_id is not None:
+            author += f" [id:{author_id}]"
+        msg_info = f"{i}. [{msg['timestamp']}] {author}: {msg['content']}"
         if msg["attachments"] > 0:
             msg_info += f" (+{msg['attachments']} attachments)"
         if msg["embeds"] > 0:
@@ -836,7 +938,10 @@ async def fetch_replied_message_context(
     except discord.Forbidden:
         return None
     except Exception as e:
-        print(f"Error fetching replied message: {e}")
+        logger.exception(
+            "context_replied_message_failed",
+            extra={"error_type": type(e).__name__},
+        )
         return None
 
 
@@ -856,6 +961,8 @@ def format_replied_message_context(
         parts.append(
             f"Author: {author_context.get('name', 'Unknown')} (@{author_context.get('username', 'unknown')})"
         )
+        if author_context.get("id") is not None:
+            parts.append(f"  User ID: {author_context['id']}")
 
         if "joined_at" in author_context:
             parts.append(f"  Joined Server: {author_context['joined_at']}")
@@ -881,15 +988,15 @@ def format_replied_message_context(
                 parts.append(msg_info)
 
         # Add memories for the author if available
-        author_username = author_context.get("username", "")
+        memory_key = _user_ref_from_context(author_context)["key"]
         if (
-            author_username
-            and author_username in user_memories
-            and user_memories[author_username]
+            memory_key
+            and memory_key in user_memories
+            and user_memories[memory_key]
         ):
             parts.append("  Memories:")
             for i, (memory_id, username, memory) in enumerate(
-                user_memories[author_username][:3], 1
+                user_memories[memory_key][:3], 1
             ):  # Limit to 3
                 parts.append(f"    {i}. {memory}")
 
@@ -909,6 +1016,7 @@ async def build_full_context_string(
     bot_previous_responses_str: str,
     channel_summary_str: Optional[str],
     replied_message_str: Optional[str] = None,
+    additional_user_memories_str: str = "None",
 ) -> str:
     """Build the full context string for the LLM."""
     emoji_usage_instructions = "You can use custom server emojis by writing :emoji_name: in your answer; they will be converted to real emojis."
@@ -934,6 +1042,7 @@ async def build_full_context_string(
         "UNTRUSTED DISCORD CONTEXT:\n"
         f"Server: {server_context}\n"
         f"Mentioned Users:\n{mentioned_users_str}\n"
+        f"Known Memories For Recent Channel Participants:\n{additional_user_memories_str}\n"
     )
 
     if replied_message_str:

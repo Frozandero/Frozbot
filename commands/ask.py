@@ -1,20 +1,29 @@
 """Ask command for Frozbot."""
 
 import datetime
-import io
+import logging
 from typing import Optional
 
 import discord
 from discord import app_commands
-from PIL import Image
 
+from attachments import ImageValidationError, read_validated_attachment
 import config
 from context import build_ask_context
 from database import is_banned
 from llm import get_llm_client
 from eleven import get_eleven_client
-from request_queue import RequestType, add_request_to_queue
-from utils import store_user_question, cleanup_expired_cooldowns
+from request_queue import (
+    RequestType,
+    add_request_to_queue,
+)
+from utils import (
+    cleanup_expired_cooldowns,
+    format_duration_seconds,
+    store_user_question,
+)
+
+logger = logging.getLogger(__name__)
 
 
 def setup_ask_commands(tree: app_commands.CommandTree, client: discord.Client):
@@ -60,24 +69,27 @@ def setup_ask_commands(tree: app_commands.CommandTree, client: discord.Client):
             if user_id in config.ASK_COMMAND_COOLDOWNS:
                 last_used = config.ASK_COMMAND_COOLDOWNS[user_id]
                 time_diff = current_time - last_used
-                minutes_passed = time_diff.total_seconds() / 60
-
-                limit_minutes = (
-                    config.ASK_COMMAND_COOLDOWN_MINUTES * 5
+                seconds_passed = time_diff.total_seconds()
+                limit_seconds = (
+                    config.ASK_COMMAND_COOLDOWN_SECONDS * 5
                     if tts
-                    else config.ASK_COMMAND_COOLDOWN_MINUTES
+                    else config.ASK_COMMAND_COOLDOWN_SECONDS
                 )
 
-                if minutes_passed < limit_minutes:
-                    remaining_minutes = int(limit_minutes - minutes_passed)
+                if seconds_passed < limit_seconds:
+                    remaining_seconds = int(limit_seconds - seconds_passed)
+                    tts_suffix = " (TTS)" if tts else ""
                     try:
                         await interaction.response.send_message(
-                            f"⏰ Rate limit: You can only ask questions once every {limit_minutes} minutes {'(TTS)' if tts else ''}. Please wait {remaining_minutes} more minutes.",
+                            f"⏰ Rate limit: You can only ask questions once every "
+                            f"{format_duration_seconds(limit_seconds)}{tts_suffix}. "
+                            f"Please wait {format_duration_seconds(remaining_seconds)}.",
                             ephemeral=True,
                         )
                     except discord.errors.NotFound:
-                        print(
-                            f"Interaction not found when sending rate limit message for user {user_id}"
+                        logger.warning(
+                            "ask_rate_limit_interaction_not_found",
+                            extra={"user_id": user_id},
                         )
                         return
                     return
@@ -104,8 +116,9 @@ def setup_ask_commands(tree: app_commands.CommandTree, client: discord.Client):
                     ephemeral=True,
                 )
             except discord.errors.NotFound:
-                print(
-                    f"Interaction not found when sending LLM config error for: {question}"
+                logger.warning(
+                    "ask_llm_config_interaction_not_found",
+                    extra={"user_id": user_id},
                 )
                 return
             return
@@ -114,18 +127,37 @@ def setup_ask_commands(tree: app_commands.CommandTree, client: discord.Client):
         try:
             await interaction.response.defer(thinking=True)
         except discord.errors.NotFound:
-            print(f"Interaction already timed out for question: {question}")
+            logger.warning(
+                "ask_defer_interaction_not_found",
+                extra={"user_id": user_id},
+            )
             return
 
         # Prepare optional image media part
         media_parts: Optional[list] = None
         try:
-            if image and getattr(image, "content_type", "").startswith("image/"):
-                image_bytes = await image.read()
-                pil_img = Image.open(io.BytesIO(image_bytes))
+            if image:
+                pil_img = await read_validated_attachment(
+                    image,
+                    source_name="ask_attachment",
+                )
                 media_parts = [pil_img]
+        except ImageValidationError as e:
+            await interaction.followup.send(
+                f"❌ **Invalid image attachment**\n\n{e}",
+                ephemeral=True,
+            )
+            return
         except Exception as e:
-            print(f"Failed to process image attachment: {e}")
+            logger.exception(
+                "ask_image_attachment_error",
+                extra={"user_id": user_id, "error_type": type(e).__name__},
+            )
+            await interaction.followup.send(
+                "❌ **Invalid image attachment**\n\nThe image could not be processed.",
+                ephemeral=True,
+            )
+            return
 
         built_context = await build_ask_context(
             client=client,
@@ -147,7 +179,13 @@ def setup_ask_commands(tree: app_commands.CommandTree, client: discord.Client):
             tts=tts if tts else False,
         )
 
-        print(f"[QUEUE] Request {request_id} added to queue")
+        logger.info(
+            "ask_request_queued",
+            extra={
+                "request_id": request_id,
+                "user_id": user_id,
+            },
+        )
 
     if config.is_tts_configured():
         @tree.command(name="ask", description="Ask the bot a question.", guild=None)

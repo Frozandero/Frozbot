@@ -9,9 +9,12 @@ A Discord bot that provides IQ calculation and AI chat functionality through a c
 - Context-aware responses using server, user, and message history
 - Channel summarization for recent conversation context and explicit `/summarize` requests
 - Rate limiting and priority-aware request queuing system
+- Backend request queue with concurrent workers and owner cleanup
 - Retry buttons that persist retry context across bot restarts while they are unexpired
+- Defensive image attachment validation before model calls
+- Structured JSON logs with request IDs, provider/model fields, and token usage
 - Owner-only configuration commands
-- Implemented as slash commands: `/iq`, `/ask`, `/queue`, `/config`, etc.
+- Implemented as slash commands: `/iq`, `/ask`, `/config`, etc.
 
 ### Prerequisites
 - Python 3.10+
@@ -76,13 +79,13 @@ python bot.py
 - `/ask <question>` - Ask the bot a question using AI
 - `/summarize [depth] [refresh]` - Summarize recent messages in the current channel
 - `/imagine <prompt> [image]` - Generate an image from a text prompt when the configured provider supports image generation and the configured account has access. Optionally include an image for reference/modification.
-- `/queue` - Check the current request queue status
 
 #### Owner Commands
 - `/config` - View current bot configuration
 - `/sethistorylimit [number]` - Set number of recent messages to fetch per user (1-50)
 - `/setsearchdepth [number]` - Set how far back to search in channel history (100-10000)
-- `/clearqueue` - Clear the request queue
+- `/queuestatus` - View backend request queue status
+- `/clearqueue` - Clear pending backend request queue entries
 - `/refresh` - Refresh slash commands (dev server only)
 
 ### Configuration
@@ -90,11 +93,14 @@ The bot supports several configurable parameters that can be set via environment
 
 - **Message History Limit**: Number of recent messages to fetch per user (default: 5)
 - **Message History Search Depth**: How far back to search in channel history (default: 1000)
-- **Ask Command Cooldown**: Rate limiting for non-owner users (default: 30 minutes)
-- **Imagine Command Cooldown**: Rate limiting for non-owner users (default: 15 minutes)
+- **Ask Command Cooldown**: Rate limiting for non-owner users via `ASK_COMMAND_COOLDOWN_SECONDS` (default: 1800 seconds)
+- **Imagine Command Cooldown**: Rate limiting for non-owner users via `IMAGINE_COMMAND_COOLDOWN_SECONDS` (default: 900 seconds)
 - **LLM Provider**: Set `LLM_PROVIDER` to `gemini`, `mistral`, or `xai`.
 - **Mistral Models**: Override `MISTRAL_TEXT_MODELS` and `MISTRAL_VISION_MODELS` for text and `/ask` image-input fallback order.
 - **Mistral Image Generation**: Set `MISTRAL_IMAGE_AGENT_ID` to a Mistral agent that has the `image_generation` tool enabled if you want `/imagine` with Mistral.
+- **Queue Concurrency**: Set `MAX_CONCURRENT_REQUESTS` and `REQUEST_DELAY_SECONDS` to control worker count and pacing.
+- **Image Input Limits**: Set `MAX_IMAGE_ATTACHMENT_BYTES`, `MAX_IMAGE_PIXELS`, and `ALLOWED_IMAGE_FORMATS` to constrain user-provided images.
+- **Logging**: Set `LOG_LEVEL` to control structured JSON logs. Context text is logged as length/hash metadata, not previews.
 
 ### Notes
 - This bot requires the Message Content intent for AI chat functionality.
@@ -102,7 +108,9 @@ The bot supports several configurable parameters that can be set via environment
 - AI responses are context-aware and include server, user, and message history information.
 - `/ask`, mention chat, and `/summarize` share the channel summary helpers. Ask-style prompts separate stable bot policy from untrusted Discord context.
 - Rate limiting applies to non-owner users to prevent spam.
-- The bot uses a queue system to handle multiple requests efficiently.
+- Deprecated `ASK_COMMAND_COOLDOWN_MINUTES` and `IMAGINE_COMMAND_COOLDOWN_MINUTES` values are converted to seconds at startup with a warning. Use the `*_SECONDS` names going forward.
+- The bot uses a backend-only UUID-based queue with configurable worker concurrency. Users see Discord's normal thinking state and then the final response; queue details are exposed only through owner-only admin commands.
+- Channel memories for specific users are stored with stable Discord user IDs when available, while display names/usernames remain visible in LLM context so users can refer to recent participants naturally.
 - The Gemini provider uses the Interactions API with `store=False`; Frozbot sends its own Discord context each turn instead of relying on server-side Gemini conversation state.
 - Slash commands are registered from startup config. Set `ASK_ENABLE=false` or `IMAGINE_ENABLE=false` before startup or `/refresh` to hide those commands from Discord.
 - If ElevenLabs is not configured, TTS options are omitted from slash commands.

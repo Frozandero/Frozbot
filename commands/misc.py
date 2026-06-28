@@ -1,6 +1,7 @@
 """Miscellaneous commands for Frozbot."""
 
 import io
+import logging
 from typing import Optional
 
 import discord
@@ -9,6 +10,8 @@ from discord import app_commands
 import config
 from iq import compute_deterministic_iq
 from eleven import generate_tts_async, get_eleven_client
+
+logger = logging.getLogger(__name__)
 
 
 def setup_misc_commands(tree: app_commands.CommandTree, client: discord.Client):
@@ -32,8 +35,9 @@ def setup_misc_commands(tree: app_commands.CommandTree, client: discord.Client):
                     f"{user.display_name}'s IQ is {iq_value}."
                 )
             except discord.errors.NotFound:
-                print(
-                    f"Interaction not found when sending IQ response for user {user.id}"
+                logger.warning(
+                    "iq_response_interaction_not_found",
+                    extra={"user_id": user.id},
                 )
                 return
         else:
@@ -42,45 +46,11 @@ def setup_misc_commands(tree: app_commands.CommandTree, client: discord.Client):
                     f"{interaction.user.display_name}, your IQ is {iq_value}."
                 )
             except discord.errors.NotFound:
-                print(
-                    f"Interaction not found when sending IQ response for user {interaction.user.id}"
+                logger.warning(
+                    "iq_response_interaction_not_found",
+                    extra={"user_id": interaction.user.id},
                 )
                 return
-
-    @tree.command(
-        name="queue", description="Check the current queue status.", guild=None
-    )
-    async def queue_command(interaction: discord.Interaction) -> None:
-        """Show the current queue status."""
-        try:
-            queue_size = config.REQUEST_QUEUE.qsize()
-
-            if queue_size == 0:
-                await interaction.response.send_message(
-                    "📋 **Queue Status**\n\n"
-                    "✅ The queue is currently empty.\n"
-                    "All requests have been processed.",
-                    ephemeral=True,
-                )
-            else:
-                queue_info = f"📋 **Queue Status**\n\n"
-                queue_info += f"🔄 **Active Requests:** {queue_size}\n"
-                queue_info += f"⚙️ **Processor Status:** {'Running' if config.QUEUE_PROCESSOR_RUNNING else 'Stopped'}\n\n"
-
-                if queue_size > 0:
-                    queue_info += "📝 **Queue Details:**\n"
-                    queue_info += f"• Total requests waiting: {queue_size}\n"
-                    queue_info += f"• Estimated wait time: {queue_size * config.REQUEST_DELAY_SECONDS} seconds\n"
-                    queue_info += f"• Delay between requests: {config.REQUEST_DELAY_SECONDS} seconds\n\n"
-                    queue_info += "💡 **Tip:** You can use `/ask` to add your question to the queue."
-
-                await interaction.response.send_message(queue_info, ephemeral=True)
-
-        except Exception as e:
-            await interaction.response.send_message(
-                f"❌ **Error checking queue status**\n\nAn error occurred: {str(e)[:200]}...",
-                ephemeral=True,
-            )
 
     async def _handle_say_command(
         interaction: discord.Interaction,

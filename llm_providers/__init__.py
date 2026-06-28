@@ -1,10 +1,14 @@
 """LLM Provider system for Frozbot."""
 
+import logging
 import os
 from dataclasses import dataclass
 from typing import Callable, Optional
 
 from .base import LLMProvider, TokenUsage
+
+logger = logging.getLogger(__name__)
+logger.addHandler(logging.NullHandler())
 
 
 @dataclass(frozen=True)
@@ -69,17 +73,20 @@ def get_provider() -> Optional[LLMProvider]:
     registration = PROVIDER_REGISTRY.get(provider_name)
     if registration is None:
         supported = ", ".join(available_provider_names())
-        print(
-            f"[ERROR] Unknown LLM provider: {provider_name}. "
-            f"Supported providers: {supported}"
+        logger.error(
+            "llm_provider_unknown",
+            extra={"provider": provider_name, "supported_providers": supported},
         )
         return None
 
     api_key = os.getenv(registration.api_key_env)
     if not api_key:
-        print(
-            f"[ERROR] Missing {registration.api_key_env} for "
-            f"LLM_PROVIDER={provider_name}"
+        logger.error(
+            "llm_provider_api_key_missing",
+            extra={
+                "provider": provider_name,
+                "api_key_env": registration.api_key_env,
+            },
         )
         return None
 

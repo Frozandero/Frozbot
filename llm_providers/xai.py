@@ -1,9 +1,9 @@
 """xAI (Grok) LLM Provider implementation."""
 
 import asyncio
-import concurrent.futures
 import io
 import base64
+import logging
 from typing import Optional, Tuple, TYPE_CHECKING
 
 from PIL import Image
@@ -18,6 +18,10 @@ except ImportError:
     XAI_SDK_AVAILABLE = False
 
 from .base import LLMProvider, TokenUsage
+from .execution import run_blocking_provider_call
+from logging_utils import context_log_fields, text_log_fields, token_usage_log_fields
+
+logger = logging.getLogger(__name__)
 
 if TYPE_CHECKING:
     from xai_sdk import Client as XAIClient
@@ -78,6 +82,7 @@ class XAIProvider(LLMProvider):
         question: str,
         context_string: str,
         media_parts: Optional[list] = None,
+        request_id: Optional[str] = None,
     ) -> Tuple[Optional[str], TokenUsage]:
         """
         Generate a response using xAI Grok with reasoning.
@@ -97,7 +102,18 @@ class XAIProvider(LLMProvider):
         model_name = "grok-4-1-fast-reasoning"
 
         try:
-            print(f"🔄 Using xAI model: {model_name}")
+            logger.info(
+                "provider_model_attempt",
+                extra={
+                    "request_id": request_id,
+                    "provider": self.provider_name,
+                    "model": model_name,
+                    "operation": "generate_response",
+                    "media_parts": len(media_parts or []),
+                    **text_log_fields("question", question),
+                    **context_log_fields(context_string),
+                },
+            )
 
             # Run the xAI API call in a thread to avoid blocking the event loop
             def call_xai_api():
@@ -137,15 +153,15 @@ class XAIProvider(LLMProvider):
                 response = chat.sample()
                 return response
 
-            # Use ThreadPoolExecutor to run the blocking API call
-            loop = asyncio.get_event_loop()
-            with concurrent.futures.ThreadPoolExecutor() as executor:
-                response = await asyncio.wait_for(
-                    loop.run_in_executor(executor, call_xai_api),
-                    timeout=60.0,  # 60 second timeout for reasoning models
-                )
-
-            print(f"✅ Success with xAI model: {model_name}")
+            response = await run_blocking_provider_call(
+                call_xai_api,
+                provider=self.provider_name,
+                model=model_name,
+                operation="generate_response",
+                timeout=60.0,
+                request_id=request_id,
+                retries=1,
+            )
 
             # Extract token usage from response
             token_usage = TokenUsage()
@@ -167,34 +183,73 @@ class XAIProvider(LLMProvider):
                     # Reasoning tokens are typically counted separately, add to input
                     token_usage.input_tokens += reasoning_tokens
 
-                print(
-                    f"📊 Token usage: {token_usage.input_tokens} input, {token_usage.output_tokens} output (total: {token_usage.total_tokens})"
+                logger.info(
+                    "provider_model_token_usage",
+                    extra={
+                        "request_id": request_id,
+                        "provider": self.provider_name,
+                        "model": model_name,
+                        **token_usage_log_fields(token_usage),
+                    },
                 )
 
             # Extract response text
             if hasattr(response, "content") and response.content:
+                logger.info(
+                    "provider_model_succeeded",
+                    extra={
+                        "request_id": request_id,
+                        "provider": self.provider_name,
+                        "model": model_name,
+                    },
+                )
                 return response.content, token_usage
             elif hasattr(response, "text") and response.text:
+                logger.info(
+                    "provider_model_succeeded",
+                    extra={
+                        "request_id": request_id,
+                        "provider": self.provider_name,
+                        "model": model_name,
+                    },
+                )
                 return response.text, token_usage
             else:
-                print(
-                    f"⚠️ Warning: {model_name} returned response without content/text attribute"
+                logger.warning(
+                    "provider_model_missing_response_text",
+                    extra={
+                        "request_id": request_id,
+                        "provider": self.provider_name,
+                        "model": model_name,
+                    },
                 )
                 return None, token_usage
 
         except asyncio.TimeoutError:
-            print(f"⏰ Timeout for {model_name}")
+            logger.warning(
+                "provider_model_timeout",
+                extra={
+                    "request_id": request_id,
+                    "provider": self.provider_name,
+                    "model": model_name,
+                },
+            )
             return None, TokenUsage()
         except Exception as e:
-            error_msg = str(e)
-            print(f"❌ Error with {model_name}: {error_msg[:200]}...")
-            import traceback
-
-            traceback.print_exc()
+            logger.exception(
+                "provider_model_failed",
+                extra={
+                    "request_id": request_id,
+                    "provider": self.provider_name,
+                    "model": model_name,
+                    "error_type": type(e).__name__,
+                    "error_message": str(e)[:200],
+                },
+            )
             return None, TokenUsage()
 
     async def summarize_messages(
-        self, serialized_messages: str
+        self, serialized_messages: str, request_id: Optional[str] = None
     ) -> Tuple[Optional[str], TokenUsage]:
         """
         Summarize a set of messages into 1–2 sentences using xAI Grok.
@@ -218,13 +273,25 @@ class XAIProvider(LLMProvider):
             "\n\nMessages:\n" + serialized_messages
         )
         try:
-            return await self.generate_response(prompt, context_instr, None)
+            return await self.generate_response(
+                prompt, context_instr, None, request_id=request_id
+            )
         except Exception as e:
-            print(f"Error summarizing messages: {e}")
+            logger.exception(
+                "provider_summarize_messages_failed",
+                extra={
+                    "request_id": request_id,
+                    "provider": self.provider_name,
+                    "error_type": type(e).__name__,
+                },
+            )
             return None, TokenUsage()
 
     async def generate_image(
-        self, prompt: str, image_parts: Optional[list] = None
+        self,
+        prompt: str,
+        image_parts: Optional[list] = None,
+        request_id: Optional[str] = None,
     ) -> Tuple[Optional[str], Optional[bytes]]:
         """
         Generate an image (and optional descriptive text) using xAI Grok image generation.
@@ -249,8 +316,14 @@ class XAIProvider(LLMProvider):
         # but for now we'll just use the text prompt
         enhanced_prompt = prompt
         if image_parts:
-            print(
-                "[WARN] xAI image generation doesn't support reference images. Using text prompt only."
+            logger.warning(
+                "provider_image_reference_ignored",
+                extra={
+                    "request_id": request_id,
+                    "provider": self.provider_name,
+                    "model": model_name,
+                    "media_parts": len(image_parts),
+                },
             )
 
         def call_xai_image_api():
@@ -263,12 +336,15 @@ class XAIProvider(LLMProvider):
             return response
 
         try:
-            loop = asyncio.get_event_loop()
-            with concurrent.futures.ThreadPoolExecutor() as executor:
-                response = await asyncio.wait_for(
-                    loop.run_in_executor(executor, call_xai_image_api),
-                    timeout=120.0,  # Longer timeout for image generation
-                )
+            response = await run_blocking_provider_call(
+                call_xai_image_api,
+                provider=self.provider_name,
+                model=model_name,
+                operation="generate_image",
+                timeout=120.0,
+                request_id=request_id,
+                retries=1,
+            )
 
             # Extract revised prompt (description) and image bytes
             description: str = ""
@@ -294,7 +370,15 @@ class XAIProvider(LLMProvider):
                     # Already bytes, use as-is
                     pass
                 else:
-                    print(f"[WARN] Unexpected image format: {type(image_bytes)}")
+                    logger.warning(
+                        "provider_image_unexpected_format",
+                        extra={
+                            "request_id": request_id,
+                            "provider": self.provider_name,
+                            "model": model_name,
+                            "image_type": type(image_bytes).__name__,
+                        },
+                    )
                     image_bytes = None
 
             # Convert JPG to PNG if we got image bytes
@@ -306,18 +390,39 @@ class XAIProvider(LLMProvider):
                     buf.seek(0)
                     return description.strip() or None, buf.getvalue()
                 except Exception as e:
-                    print(f"Error converting image to PNG: {e}")
+                    logger.exception(
+                        "provider_image_png_conversion_failed",
+                        extra={
+                            "request_id": request_id,
+                            "provider": self.provider_name,
+                            "model": model_name,
+                            "error_type": type(e).__name__,
+                        },
+                    )
                     # Return raw bytes if conversion fails
                     return description.strip() or None, image_bytes
 
             return description.strip() or None, None
 
         except asyncio.TimeoutError:
-            print("⏰ Image generation timed out for xAI provider.")
+            logger.warning(
+                "provider_image_timeout",
+                extra={
+                    "request_id": request_id,
+                    "provider": self.provider_name,
+                    "model": model_name,
+                },
+            )
             return None, None
         except Exception as e:
-            print(f"❌ Image generation error: {str(e)[:200]}...")
-            import traceback
-
-            traceback.print_exc()
+            logger.exception(
+                "provider_image_failed",
+                extra={
+                    "request_id": request_id,
+                    "provider": self.provider_name,
+                    "model": model_name,
+                    "error_type": type(e).__name__,
+                    "error_message": str(e)[:200],
+                },
+            )
             return None, None

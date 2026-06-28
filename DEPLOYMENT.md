@@ -2,7 +2,7 @@
 
 ## Prerequisites
 - Ubuntu/Debian VPS with systemd
-- Python 3.8+ installed
+- Python 3.10+ installed
 - Your Discord bot token and configuration
 
 ## Setup Steps
@@ -62,6 +62,7 @@ bash deploy.sh start
 ```
 
 The install command generates `/etc/systemd/system/frozbot.service` using the current checkout path and current Unix user. It auto-detects Python from `.venv`, `venv`, or `env` under the repo, then falls back to `python3`/`python` on `PATH`.
+The generated unit loads `$BOT_DIR/.env` with `EnvironmentFile=-...`, sets `PYTHONUNBUFFERED=1`, waits for `network-online.target`, and writes structured logs to journald.
 
 Optional overrides:
 ```bash
@@ -96,6 +97,8 @@ bash deploy.sh restart  # Restart the bot
 bash deploy.sh status   # Check if bot is running
 bash deploy.sh logs     # View real-time logs
 ```
+
+Logs are structured JSON by default. Set `LOG_LEVEL` in `.env` if you need more or less verbosity.
 
 ### Refresh Commands (No Restart Needed!)
 After making changes to your bot code:

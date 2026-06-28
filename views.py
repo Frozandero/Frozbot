@@ -1,22 +1,36 @@
 """Discord UI views for Frozbot."""
 
+import logging
+
 import discord
 
 from database import count_memories_by_user, get_memories_by_user
+
+logger = logging.getLogger(__name__)
 
 
 class MemoryPaginationView(discord.ui.View):
     """Paginated view for displaying memories."""
 
     def __init__(
-        self, username: str, channel_id: int, page: int = 0, page_size: int = 10
+        self,
+        username: str,
+        channel_id: int,
+        page: int = 0,
+        page_size: int = 10,
+        user_id: int | None = None,
+        display_name: str | None = None,
     ):
         super().__init__(timeout=300)  # 5 minute timeout
         self.username = username
+        self.user_id = user_id
+        self.display_name = display_name
         self.page = page
         self.page_size = page_size
         self.channel_id = channel_id
-        self.total_memories = count_memories_by_user(username, channel_id)
+        self.total_memories = count_memories_by_user(
+            username, channel_id, user_id=user_id
+        )
         self.total_pages = max(1, (self.total_memories + page_size - 1) // page_size)
 
         # Update button states
@@ -59,14 +73,19 @@ class MemoryPaginationView(discord.ui.View):
         """Get memories for the current page."""
         offset = self.page * self.page_size
         return get_memories_by_user(
-            self.username, self.channel_id, self.page_size, offset
+            self.username,
+            self.channel_id,
+            self.page_size,
+            offset,
+            user_id=self.user_id,
         )
 
     def format_memories_message(self) -> str:
         """Format memories into a displayable message."""
         memories = self.get_current_memories()
+        label = self.display_name or self.username
         if not memories:
-            return f"No memories found for {self.username}."
+            return f"No memories found for {label}."
 
         # Limit memory length for display to prevent overly long messages
         formatted_memories = []
@@ -80,7 +99,7 @@ class MemoryPaginationView(discord.ui.View):
 
         memory_text = "\n".join(formatted_memories)
 
-        return f"**Memories for {self.username}** ({self.total_memories} total):\n\n{memory_text}"
+        return f"**Memories for {label}** ({self.total_memories} total):\n\n{memory_text}"
 
     async def previous_page(self, interaction: discord.Interaction):
         """Handle previous page button click."""
@@ -94,7 +113,10 @@ class MemoryPaginationView(discord.ui.View):
             else:
                 await interaction.response.defer()
         except Exception as e:
-            print(f"Error in previous_page: {e}")
+            logger.exception(
+                "memory_previous_page_error",
+                extra={"error_type": type(e).__name__},
+            )
             await interaction.response.defer()
 
     async def next_page(self, interaction: discord.Interaction):
@@ -109,7 +131,10 @@ class MemoryPaginationView(discord.ui.View):
             else:
                 await interaction.response.defer()
         except Exception as e:
-            print(f"Error in next_page: {e}")
+            logger.exception(
+                "memory_next_page_error",
+                extra={"error_type": type(e).__name__},
+            )
             await interaction.response.defer()
 
     async def on_timeout(self):
