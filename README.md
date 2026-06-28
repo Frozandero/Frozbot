@@ -17,8 +17,9 @@ A Discord bot that provides IQ calculation and AI chat functionality through a c
 - A Discord application and bot token with the following OAuth2 scopes when inviting:
   - `bot`
   - `applications.commands`
-- Gemini or xAI API key for AI chat functionality, depending on `LLM_PROVIDER`
+- Gemini, Mistral, or xAI API key for AI chat functionality, depending on `LLM_PROVIDER`
 - `google-genai>=2.3.0` is required for Gemini's Interactions API
+- `mistralai>=2.0.0` is required for Mistral chat, vision, and optional image-generation-agent support
 
 ### Setup
 1. Clone or open this project.
@@ -49,6 +50,7 @@ A Discord bot that provides IQ calculation and AI chat functionality through a c
    OWNER_ID=your-user-id-here
    LLM_PROVIDER=gemini
    GEMINI_API_KEY=your-gemini-api-key-here
+   # or use LLM_PROVIDER=mistral with MISTRAL_API_KEY
    # or use LLM_PROVIDER=xai with XAI_API_KEY
    # Optional: provide a test guild ID to sync commands instantly in one server
    # If omitted, commands are synced globally (can take up to 1 hour to appear)
@@ -88,6 +90,9 @@ The bot supports several configurable parameters that can be set via environment
 - **Message History Search Depth**: How far back to search in channel history (default: 1000)
 - **Ask Command Cooldown**: Rate limiting for non-owner users (default: 30 minutes)
 - **Imagine Command Cooldown**: Rate limiting for non-owner users (default: 15 minutes)
+- **LLM Provider**: Set `LLM_PROVIDER` to `gemini`, `mistral`, or `xai`.
+- **Mistral Models**: Override `MISTRAL_TEXT_MODELS` and `MISTRAL_VISION_MODELS` for text and `/ask` image-input fallback order.
+- **Mistral Image Generation**: Set `MISTRAL_IMAGE_AGENT_ID` to a Mistral agent that has the `image_generation` tool enabled if you want `/imagine` with Mistral.
 
 ### Notes
 - This bot requires the Message Content intent for AI chat functionality.
@@ -99,3 +104,5 @@ The bot supports several configurable parameters that can be set via environment
 - Slash commands are registered from startup config. Set `ASK_ENABLE=false` or `IMAGINE_ENABLE=false` before startup or `/refresh` to hide those commands from Discord.
 - If ElevenLabs is not configured, TTS options are omitted from slash commands.
 - Gemini text/chat and image-generation fallback models can be overridden with `GEMINI_TEXT_IMAGE_MODELS` and `GEMINI_IMAGE_MODELS`.
+- Mistral text/chat and `/ask` image-input fallback models can be overridden with `MISTRAL_TEXT_MODELS` and `MISTRAL_VISION_MODELS`.
+- Mistral `/imagine` requires `MISTRAL_IMAGE_AGENT_ID`; otherwise Mistral is treated as chat and vision-input only.

@@ -30,6 +30,12 @@ def get_llm_provider():
     return _get_provider()
 
 
+def provider_supports_image_generation() -> bool:
+    """Return whether the configured provider can generate images."""
+    provider = _get_provider()
+    return bool(provider and provider.supports_image_generation())
+
+
 async def generate_response_with_llm(
     question: str, context_string: str, media_parts: Optional[list]
 ) -> Tuple[Optional[str], TokenUsage]:
@@ -84,7 +90,7 @@ async def generate_image_with_llm(
         (description_text, image_bytes_png) where either may be None on failure
     """
     provider = _get_provider()
-    if not provider or not hasattr(provider, "generate_image"):
+    if not provider or not provider.supports_image_generation():
         return None, None
 
     return await provider.generate_image(prompt, image_parts)

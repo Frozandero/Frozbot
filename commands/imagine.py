@@ -13,7 +13,11 @@ from PIL import Image
 import config
 from database import is_banned
 from emoji import replace_guild_emojis_in_text
-from llm import generate_image_with_llm, get_llm_provider
+from llm import (
+    generate_image_with_llm,
+    get_llm_provider,
+    provider_supports_image_generation,
+)
 from utils import filter_profanity, cleanup_imagine_expired_cooldowns
 
 
@@ -91,6 +95,23 @@ def setup_imagine_commands(tree: app_commands.CommandTree, client: discord.Clien
             try:
                 await interaction.response.send_message(
                     "The bot is not configured with an LLM provider. Please contact the server owner.",
+                    ephemeral=True,
+                )
+            except discord.errors.NotFound:
+                return
+            return
+
+        if not provider_supports_image_generation():
+            provider_name = getattr(
+                provider, "provider_name", provider.__class__.__name__
+            )
+            print(
+                f"[ERROR] /imagine attempted but provider {provider_name} does not support image generation"
+            )
+            try:
+                await interaction.response.send_message(
+                    f"The configured LLM provider ({provider_name}) is not configured "
+                    "for image generation.",
                     ephemeral=True,
                 )
             except discord.errors.NotFound:

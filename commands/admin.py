@@ -211,6 +211,8 @@ def setup_admin_commands(tree: app_commands.CommandTree, client: discord.Client)
             config_info += (
                 f"**Max Stored Questions:** {config.MAX_STORED_QUESTIONS} questions\n\n"
             )
+            config_info += "**LLM Provider:**\n"
+            config_info += f"• Selected: {config.LLM_PROVIDER}\n\n"
             config_info += "**Image Generation:**\n"
             config_info += f"• Enabled: {config.IMAGINE_ENABLE}\n\n"
             config_info += "**TTS:**\n"

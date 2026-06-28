@@ -21,6 +21,12 @@ class TokenUsage:
 class LLMProvider(ABC):
     """Base class for LLM providers."""
 
+    provider_name = "unknown"
+
+    def supports_image_generation(self) -> bool:
+        """Return whether this provider can generate images in the current config."""
+        return False
+
     @abstractmethod
     async def generate_response(
         self,

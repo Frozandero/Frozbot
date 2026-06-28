@@ -13,7 +13,7 @@ This file is the primary orientation document for future coding agents. Keep it 
 1. Check current state with `git status --short`.
 2. Read this file, then inspect the specific modules you will touch.
 3. Do not read `.env`, `database.db`, `venv/`, `.venv/`, `temp_media/`, or generated caches unless the task explicitly requires it.
-4. Avoid live Discord, Gemini, xAI, ElevenLabs, or FFmpeg calls unless the user asks for integration testing.
+4. Avoid live Discord, Gemini, Mistral, xAI, ElevenLabs, or FFmpeg calls unless the user asks for integration testing.
 5. Prefer small, local verification:
    - `python -m compileall -q .`
    - `python -m unittest discover -s tests`
@@ -34,16 +34,19 @@ Required environment:
 - `DISCORD_BOT_TOKEN`
 - `OWNER_ID`
 - `GEMINI_API_KEY` when `LLM_PROVIDER=gemini`
+- `MISTRAL_API_KEY` when `LLM_PROVIDER=mistral`
 - `XAI_API_KEY` when `LLM_PROVIDER=xai`
 
 Important optional environment:
 
 - `DISCORD_GUILD_ID` for guild-scoped command sync
 - `DEV_SERVER_ID` for dev-only admin commands
-- `LLM_PROVIDER`, currently `gemini` or `xai`
+- `LLM_PROVIDER`, currently `gemini`, `mistral`, or `xai`
 - `ELEVENLABS_API_KEY` and `ELEVENLABS_VOICE_ID`
 - `ASK_ENABLE`, `IMAGINE_ENABLE`, `REQUIRE_EXPLICIT_MENTION`
 - cooldown, context-depth, and channel-summary variables in `config.env.example`
+- `MISTRAL_TEXT_MODELS`, `MISTRAL_VISION_MODELS`, `MISTRAL_TIMEOUT_SECONDS`
+- `MISTRAL_IMAGE_AGENT_ID` for Mistral `/imagine` support through a Mistral image-generation agent
 
 ## Architecture Map
 
@@ -59,7 +62,7 @@ Important optional environment:
 - `context.py`: Shared context construction for recent messages, channel summaries, user/member info, replied-message context, memories, and final system prompt.
 - `request_queue.py`: Priority-aware async request processing for ask/retry requests and response delivery.
 - `llm.py`: Provider-neutral facade around the provider system.
-- `llm_providers/`: Provider abstraction and concrete Gemini/xAI implementations.
+- `llm_providers/`: Provider abstraction, provider registry, and concrete Gemini/Mistral/xAI implementations.
 - `emoji.py`: Guild custom emoji discovery, replacement, and debug output.
 - `eleven.py`: ElevenLabs TTS and FFmpeg conversion.
 - `retry.py`: Persistent retry records plus temporary persisted image files for retry buttons.
@@ -70,8 +73,10 @@ Important optional environment:
 ## Coding Rules
 
 - Preserve the provider abstraction. New LLM backends should implement `LLMProvider`, be wired in `llm_providers/__init__.py`, and expose config in `config.env.example`.
+- Provider loading is registry-based and lazy. Avoid top-level imports that make one provider's SDK mandatory for all other providers.
 - The Gemini provider uses `google-genai>=2.3.0` and the Interactions API (`client.interactions.create`) with `store=False`. Do not reintroduce deprecated `google-generativeai` or `models.generate_content` paths unless intentionally adding a compatibility layer.
 - Gemini text/chat and image-generation fallback models are configurable through `GEMINI_TEXT_IMAGE_MODELS` and `GEMINI_IMAGE_MODELS`; do not hard-code assumptions about the project's billing tier.
+- The Mistral provider uses `mistralai>=2.0.0`, chat completions for text and vision input, and an optional configured image-generation agent for `/imagine`. Do not auto-create remote Mistral agents during normal bot requests.
 - Slash command registration is config-sensitive at sync time. `ASK_ENABLE` and `IMAGINE_ENABLE` hide commands when false, and TTS options are omitted when ElevenLabs is not configured.
 - Keep slash-command `/ask` and mention-based chat behavior aligned. If you change context assembly in `commands/ask.py`, check whether `_build_message_context()` in `handlers.py` needs the same change.
 - Always defer Discord interactions before long work such as history reads, LLM calls, image processing, TTS, or network fetches.

@@ -28,6 +28,8 @@ else:
 class XAIProvider(LLMProvider):
     """xAI (Grok) provider implementation."""
 
+    provider_name = "xai"
+
     def __init__(self, api_key: str):
         """
         Initialize xAI provider.
@@ -57,6 +59,10 @@ class XAIProvider(LLMProvider):
         if not XAI_SDK_AVAILABLE:
             return False
         return self.api_key is not None and len(self.api_key) > 0
+
+    def supports_image_generation(self) -> bool:
+        """Return whether xAI image generation is available."""
+        return self.is_available()
 
     def get_client(self):
         """Get the xAI client (for compatibility)."""

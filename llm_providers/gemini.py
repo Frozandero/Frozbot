@@ -113,6 +113,8 @@ def _extract_interaction_image_bytes(interaction) -> Optional[bytes]:
 class GeminiProvider(LLMProvider):
     """Gemini AI provider implementation."""
 
+    provider_name = "gemini"
+
     def __init__(self, api_key: str):
         """
         Initialize Gemini provider.
@@ -132,6 +134,10 @@ class GeminiProvider(LLMProvider):
     def is_available(self) -> bool:
         """Check if Gemini is available."""
         return self.api_key is not None and len(self.api_key) > 0
+
+    def supports_image_generation(self) -> bool:
+        """Return whether Gemini image generation is configured."""
+        return bool(GEMINI_IMAGE_MODELS)
 
     def get_client(self):
         """Get the Gemini client (for compatibility)."""
