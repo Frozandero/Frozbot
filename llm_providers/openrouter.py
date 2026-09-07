@@ -26,6 +26,15 @@ logger = logging.getLogger(__name__)
 DEFAULT_OPENROUTER_TEXT_MODELS = ["minimax/minimax-m3:free"]
 DEFAULT_OPENROUTER_MULTIMODAL_MODELS = ["minimax/minimax-m3:free"]
 DEFAULT_OPENROUTER_AUDIO_MODELS: list[str] = []
+OPENROUTER_REASONING_EFFORTS = {
+    "none",
+    "minimal",
+    "low",
+    "medium",
+    "high",
+    "xhigh",
+    "max",
+}
 
 _AUDIO_FORMATS = {
     "audio/aac": "aac",
@@ -48,6 +57,19 @@ def _parse_model_list(raw_value: Optional[str], default_models: list[str]) -> li
     if raw_value is None:
         return list(default_models)
     return [model.strip() for model in raw_value.split(",") if model.strip()]
+
+
+def _parse_reasoning_effort(raw_value: Optional[str]) -> Optional[str]:
+    if raw_value is None or not raw_value.strip():
+        return None
+
+    reasoning_effort = raw_value.strip().lower()
+    if reasoning_effort not in OPENROUTER_REASONING_EFFORTS:
+        allowed = ", ".join(sorted(OPENROUTER_REASONING_EFFORTS))
+        raise ValueError(
+            f"Invalid OPENROUTER_REASONING_EFFORT {raw_value!r}; allowed: {allowed}."
+        )
+    return reasoning_effort
 
 
 def _get_value(obj: object, key: str, default: Any = None) -> Any:
@@ -193,6 +215,7 @@ class OpenRouterProvider(LLMProvider):
         audio_models: Optional[list[str]] = None,
         image_models: Optional[list[str]] = None,
         timeout_seconds: Optional[float] = None,
+        reasoning_effort: Optional[str] = None,
     ):
         self.api_key = api_key
         self.text_models = (
@@ -226,6 +249,11 @@ class OpenRouterProvider(LLMProvider):
         )
         self.timeout_seconds = timeout_seconds or float(
             os.getenv("OPENROUTER_TIMEOUT_SECONDS", "55")
+        )
+        self.reasoning_effort = _parse_reasoning_effort(
+            reasoning_effort
+            if reasoning_effort is not None
+            else os.getenv("OPENROUTER_REASONING_EFFORT")
         )
         self.http_referer = os.getenv("OPENROUTER_HTTP_REFERER") or None
         self.app_title = os.getenv("OPENROUTER_APP_TITLE", "Frozbot") or None
@@ -340,6 +368,8 @@ class OpenRouterProvider(LLMProvider):
             }
             if self.provider_preferences:
                 request_args["provider"] = self.provider_preferences
+            if self.reasoning_effort:
+                request_args["reasoning"] = {"effort": self.reasoning_effort}
 
             logger.info(
                 "provider_model_attempt",

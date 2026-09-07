@@ -2,8 +2,10 @@ import asyncio
 import base64
 import io
 import importlib.util
+import os
 import unittest
 from types import SimpleNamespace
+from unittest.mock import patch
 
 
 @unittest.skipUnless(
@@ -48,6 +50,7 @@ class OpenRouterProviderTests(unittest.TestCase):
         provider = OpenRouterProvider(
             "test-key",
             text_models=["minimax/minimax-m3:free"],
+            reasoning_effort="",
         )
         provider._client = SimpleNamespace(chat=FakeChat())
 
@@ -68,6 +71,41 @@ class OpenRouterProviderTests(unittest.TestCase):
             ],
         )
         self.assertFalse(calls[0]["stream"])
+        self.assertNotIn("reasoning", calls[0])
+
+    def test_reasoning_effort_none_is_sent_from_environment(self):
+        from llm_providers.openrouter import OpenRouterProvider
+
+        calls = []
+
+        class FakeChat:
+            async def send_async(self, **kwargs):
+                calls.append(kwargs)
+                return SimpleNamespace(
+                    model="reasoning-test",
+                    choices=[SimpleNamespace(message=SimpleNamespace(content="ok"))],
+                    usage=None,
+                )
+
+        with patch.dict(
+            os.environ,
+            {"OPENROUTER_REASONING_EFFORT": "none"},
+        ):
+            provider = OpenRouterProvider("test-key", text_models=["reasoning-test"])
+        provider._client = SimpleNamespace(chat=FakeChat())
+
+        text, _ = asyncio.run(
+            provider.generate_response("question", "system prompt", None)
+        )
+
+        self.assertEqual(text, "ok")
+        self.assertEqual(calls[0]["reasoning"], {"effort": "none"})
+
+    def test_invalid_reasoning_effort_is_rejected(self):
+        from llm_providers.openrouter import OpenRouterProvider
+
+        with self.assertRaisesRegex(ValueError, "OPENROUTER_REASONING_EFFORT"):
+            OpenRouterProvider("test-key", reasoning_effort="turbo")
 
     def test_generate_response_builds_image_audio_and_video_content(self):
         from PIL import Image
@@ -208,7 +246,11 @@ class OpenRouterProviderTests(unittest.TestCase):
     def test_minimax_default_does_not_claim_audio_input(self):
         from llm_providers.openrouter import OpenRouterProvider
 
-        provider = OpenRouterProvider("test-key")
+        provider = OpenRouterProvider(
+            "test-key",
+            multimodal_models=["minimax/minimax-m3:free"],
+            audio_models=[],
+        )
         provider._client = SimpleNamespace()
 
         self.assertFalse(provider.supports_media_type("audio/mpeg"))

@@ -50,7 +50,7 @@ Important optional environment:
 - `REQUEST_DELAY_SECONDS`, `MAX_CONCURRENT_REQUESTS`, `LOG_LEVEL`, `MAX_IMAGE_ATTACHMENT_BYTES`, `MAX_IMAGE_PIXELS`, `ALLOWED_IMAGE_FORMATS`
 - `MISTRAL_TEXT_MODELS`, `MISTRAL_VISION_MODELS`, `MISTRAL_TIMEOUT_SECONDS`
 - `MISTRAL_IMAGE_AGENT_ID` for Mistral `/imagine` support through a Mistral image-generation agent
-- `OPENROUTER_TEXT_MODELS`, `OPENROUTER_MULTIMODAL_MODELS`, `OPENROUTER_AUDIO_MODELS`, `OPENROUTER_IMAGE_MODELS`, `OPENROUTER_TIMEOUT_SECONDS`
+- `OPENROUTER_TEXT_MODELS`, `OPENROUTER_MULTIMODAL_MODELS`, `OPENROUTER_AUDIO_MODELS`, `OPENROUTER_IMAGE_MODELS`, `OPENROUTER_TIMEOUT_SECONDS`, `OPENROUTER_REASONING_EFFORT`
 - `MAX_AUDIO_ATTACHMENT_BYTES`, `MAX_VIDEO_ATTACHMENT_BYTES`, `ALLOWED_AUDIO_FORMATS`, `ALLOWED_VIDEO_FORMATS`
 
 ## Architecture Map
@@ -85,7 +85,7 @@ Important optional environment:
 - The Gemini provider uses `google-genai>=2.3.0` and the Interactions API (`client.interactions.create`) with `store=False`. Do not reintroduce deprecated `google-generativeai` or `models.generate_content` paths unless intentionally adding a compatibility layer.
 - Gemini text/chat and image-generation fallback models are configurable through `GEMINI_TEXT_IMAGE_MODELS` and `GEMINI_IMAGE_MODELS`; do not hard-code assumptions about the project's billing tier.
 - The Mistral provider uses `mistralai>=2.0.0`, chat completions for text and vision input, and an optional configured image-generation agent for `/imagine`. Do not auto-create remote Mistral agents during normal bot requests.
-- The OpenRouter provider uses the native async `openrouter` SDK. Its text and multimodal model fallbacks are configurable separately; `/imagine` is enabled only when `OPENROUTER_IMAGE_MODELS` is set. MiniMax M3 Free is the default and currently supports text/image/video input with text output, not audio input.
+- The OpenRouter provider uses the native async `openrouter` SDK. Its text and multimodal model fallbacks are configurable separately; `/imagine` is enabled only when `OPENROUTER_IMAGE_MODELS` is set. `OPENROUTER_REASONING_EFFORT` controls optional model reasoning, with `none` disabling it when the selected model permits. MiniMax M3 Free is the default and currently supports text/image/video input with text output, not audio input.
 - Slash command registration is config-sensitive at sync time. `ASK_ENABLE` and `IMAGINE_ENABLE` hide commands when false, and TTS options are omitted when ElevenLabs is not configured.
 - Keep slash-command `/ask` and mention-based chat behavior aligned through `context.build_ask_context()`.
 - Keep the shared ask persona irreverent and concise: normal replies default to 1–3 direct sentences, with casual profanity, dark humor, sarcasm, and playful roasting permitted, while retaining the explicit prohibitions on slurs, protected-group attacks, and racial stereotyping.

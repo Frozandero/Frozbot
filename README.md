@@ -110,6 +110,7 @@ The bot supports several configurable parameters that can be set via environment
 - **Mistral Models**: Override `MISTRAL_TEXT_MODELS` and `MISTRAL_VISION_MODELS` for text and `/ask` image-input fallback order.
 - **Mistral Image Generation**: Set `MISTRAL_IMAGE_AGENT_ID` to a Mistral agent that has the `image_generation` tool enabled if you want `/imagine` with Mistral.
 - **OpenRouter Models**: Override `OPENROUTER_TEXT_MODELS` and `OPENROUTER_MULTIMODAL_MODELS` with comma-separated fallback lists. Both default to `minimax/minimax-m3:free`. Configure `OPENROUTER_AUDIO_MODELS` separately for an audio-capable model.
+- **OpenRouter Reasoning**: Set `OPENROUTER_REASONING_EFFORT=none` to disable reasoning for models where it is optional. Other supported values are `minimal`, `low`, `medium`, `high`, `xhigh`, and `max`; leaving it unset uses the model default.
 - **OpenRouter Image Generation**: Set `OPENROUTER_IMAGE_MODELS` to one or more image-output model slugs to enable `/imagine`; MiniMax M3 Free is text-output only.
 - **Queue Concurrency**: Set `MAX_CONCURRENT_REQUESTS` and `REQUEST_DELAY_SECONDS` to control worker count and pacing.
 - **Media Input Limits**: Image inputs use `MAX_IMAGE_ATTACHMENT_BYTES`, `MAX_IMAGE_PIXELS`, and `ALLOWED_IMAGE_FORMATS`. Audio/video inputs use their corresponding `MAX_*_ATTACHMENT_BYTES` and `ALLOWED_*_FORMATS` settings.
