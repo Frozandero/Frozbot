@@ -18,6 +18,15 @@ class TokenUsage:
         return self.input_tokens + self.output_tokens
 
 
+@dataclass(frozen=True)
+class BinaryMediaPart:
+    """Validated non-image media passed to multimodal providers."""
+
+    data: bytes
+    mime_type: str
+    filename: Optional[str] = None
+
+
 class LLMProvider(ABC):
     """Base class for LLM providers."""
 
@@ -26,6 +35,10 @@ class LLMProvider(ABC):
     def supports_image_generation(self) -> bool:
         """Return whether this provider can generate images in the current config."""
         return False
+
+    def supports_media_type(self, mime_type: str) -> bool:
+        """Return whether this provider accepts the given input media type."""
+        return mime_type.lower().startswith("image/")
 
     @abstractmethod
     async def generate_response(

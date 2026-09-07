@@ -2,6 +2,7 @@
 
 import json
 import logging
+import mimetypes
 import os
 import re
 import time
@@ -10,6 +11,7 @@ from typing import Any, Optional
 from PIL import Image
 
 import config
+from llm_providers.base import BinaryMediaPart
 
 logger = logging.getLogger(__name__)
 
@@ -74,8 +76,19 @@ def _load_media_paths(paths: Optional[list], delete_files: bool = True) -> Optio
             continue
 
         try:
-            with Image.open(path) as img:
-                loaded.append(img.copy())
+            content_type, _ = mimetypes.guess_type(path)
+            if content_type and content_type.startswith(("audio/", "video/")):
+                with open(path, "rb") as media_file:
+                    loaded.append(
+                        BinaryMediaPart(
+                            data=media_file.read(),
+                            mime_type=content_type,
+                            filename=os.path.basename(path),
+                        )
+                    )
+            else:
+                with Image.open(path) as img:
+                    loaded.append(img.copy())
         except Exception:
             pass
 
@@ -104,6 +117,17 @@ def save_retry_media(custom_id: str, media_parts: Optional[list]) -> list[str]:
                 if isinstance(part, Image.Image):
                     path = os.path.join(config.ASK_IMAGES_DIR, f"{custom_id}_{idx}.png")
                     part.convert("RGB").save(path, format="PNG")
+                    saved_paths.append(path)
+                elif isinstance(part, BinaryMediaPart):
+                    extension = os.path.splitext(part.filename or "")[1].lower()
+                    if not re.fullmatch(r"\.[a-z0-9]{1,8}", extension):
+                        extension = mimetypes.guess_extension(part.mime_type) or ".bin"
+                    path = os.path.join(
+                        config.ASK_IMAGES_DIR,
+                        f"{custom_id}_{idx}{extension}",
+                    )
+                    with open(path, "wb") as media_file:
+                        media_file.write(part.data)
                     saved_paths.append(path)
             except Exception:
                 continue

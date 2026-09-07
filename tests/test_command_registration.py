@@ -66,6 +66,9 @@ class CommandRegistrationTests(unittest.TestCase):
         summarize_command = tree.get_command("summarize")
 
         self.assertNotIn("tts", [param.name for param in ask_command.parameters])
+        self.assertIn("image", [param.name for param in ask_command.parameters])
+        self.assertIn("audio", [param.name for param in ask_command.parameters])
+        self.assertIn("video", [param.name for param in ask_command.parameters])
         self.assertNotIn("tts", [param.name for param in say_command.parameters])
         self.assertIsNotNone(summarize_command)
 

@@ -66,6 +66,37 @@ class RetryPersistenceTests(unittest.TestCase):
         self.assertEqual(len(record["media_parts"]), 1)
         self.assertIsNone(load_retry_record(custom_id))
 
+    def test_retry_record_preserves_binary_media(self):
+        from llm_providers.base import BinaryMediaPart
+        from retry import load_retry_record, save_retry_record
+
+        custom_id = "retry_123_abcdef_token_1001"
+        media = BinaryMediaPart(
+            data=b"video-bytes",
+            mime_type="video/mp4",
+            filename="clip.mp4",
+        )
+
+        saved = save_retry_record(
+            custom_id=custom_id,
+            user_id=123,
+            question="what happens?",
+            context_string="server context",
+            tts=False,
+            media_parts=[media],
+        )
+        self.assertTrue(saved)
+
+        self.config.RETRY_MEDIA_TEMP.clear()
+        record = load_retry_record(custom_id)
+
+        self.assertIsNotNone(record)
+        self.assertEqual(len(record["media_parts"]), 1)
+        restored = record["media_parts"][0]
+        self.assertIsInstance(restored, BinaryMediaPart)
+        self.assertEqual(restored.data, b"video-bytes")
+        self.assertEqual(restored.mime_type, "video/mp4")
+
 
 if __name__ == "__main__":
     unittest.main()

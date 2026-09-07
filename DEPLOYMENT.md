@@ -38,16 +38,24 @@ OWNER_ID=your_discord_user_id
 ### 4. Bootstrap the Service
 ```bash
 # Create the frozbot system user, install to /opt/frozbot, create the venv,
-# install dependencies, register the service, and start it.
-sudo bash deploy.sh bootstrap
+# install dependencies, copy this checkout's .env, register the service, and start it.
+sudo bash deploy.sh bootstrap --copy-env
 ```
 
 The bootstrap command creates a dedicated `frozbot` system user and copies the app to `/opt/frozbot`. This is recommended when the repo was cloned under `/root`, because non-root service users cannot normally read files inside `/root`.
+
+On later redeploys, omit `--copy-env`:
+```bash
+sudo bash deploy.sh bootstrap
+```
+
+Bootstrap preserves `/opt/frozbot/.env`, `/opt/frozbot/database.db`, `/opt/frozbot/temp_media/`, virtual environments, caches, coverage output, and log files by default. It reinstalls declared dependencies and restarts the service so updated code is loaded. Use `--copy-env` only when you intentionally want to replace the deployed environment file with the checkout's `.env`.
 
 Optional bootstrap overrides:
 ```bash
 sudo FROZBOT_BOOTSTRAP_USER=mybot bash deploy.sh bootstrap
 sudo FROZBOT_BOOTSTRAP_DIR=/srv/frozbot bash deploy.sh bootstrap
+sudo FROZBOT_BOOTSTRAP_DIR=/srv/frozbot bash deploy.sh bootstrap --copy-env
 ```
 
 ### 5. Manual Service Install
@@ -100,12 +108,12 @@ bash deploy.sh logs     # View real-time logs
 
 Logs are structured JSON by default. Set `LOG_LEVEL` in `.env` if you need more or less verbosity.
 
-### Refresh Commands (No Restart Needed!)
+### Deploy Code and Refresh Commands
 After making changes to your bot code:
 
 1. **Upload the updated files** to your VPS
-2. **Use the `/refresh` command** in Discord (only you can use this)
-3. **Or restart the service**: `bash deploy.sh restart`
+2. **Redeploy and restart**: `sudo bash deploy.sh bootstrap`
+3. **Use `/refresh` only when you need to resync Discord slash commands without changing running Python code**
 
 ## Troubleshooting
 

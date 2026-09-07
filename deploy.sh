@@ -1,7 +1,8 @@
 #!/bin/bash
 
 # FrozBot Deployment Script
-# Usage: ./deploy.sh [bootstrap|install|start|stop|restart|status|logs|refresh]
+# Usage: ./deploy.sh bootstrap [--copy-env]
+#        ./deploy.sh [install|start|stop|restart|status|logs|refresh]
 
 BOT_NAME="frozbot"
 SERVICE_NAME="${BOT_NAME}.service"
@@ -102,9 +103,32 @@ EOF
 
 case "$1" in
     bootstrap)
+        COPY_ENV=false
+        case "${2:-}" in
+            "")
+                ;;
+            --copy-env)
+                COPY_ENV=true
+                ;;
+            *)
+                echo "Error: unknown bootstrap option: $2"
+                echo "Usage: $0 bootstrap [--copy-env]"
+                exit 1
+                ;;
+        esac
+        if [ "$#" -gt 2 ]; then
+            echo "Error: bootstrap accepts only the optional --copy-env flag."
+            echo "Usage: $0 bootstrap [--copy-env]"
+            exit 1
+        fi
+
         if [ "$(id -u)" -ne 0 ]; then
             echo "Error: bootstrap must be run as root."
-            echo "Use sudo ./deploy.sh bootstrap"
+            echo "Use sudo ./deploy.sh bootstrap [--copy-env]"
+            exit 1
+        fi
+        if [ "$COPY_ENV" = true ] && [ ! -f "$SCRIPT_DIR/.env" ]; then
+            echo "Error: --copy-env was requested, but $SCRIPT_DIR/.env does not exist."
             exit 1
         fi
 
@@ -119,16 +143,26 @@ case "$1" in
         mkdir -p "$BOOTSTRAP_DIR"
         rsync -a \
             --exclude ".git/" \
+            --exclude ".env" \
+            --exclude ".env.*" \
             --exclude ".venv/" \
             --exclude "venv/" \
             --exclude "env/" \
+            --exclude "database.db" \
+            --exclude "temp_media/" \
             --exclude "__pycache__/" \
             --exclude "*.pyc" \
+            --exclude ".pytest_cache/" \
+            --exclude ".mypy_cache/" \
+            --exclude ".ruff_cache/" \
+            --exclude ".coverage" \
+            --exclude "htmlcov/" \
+            --exclude "*.log" \
             "$SCRIPT_DIR/" "$BOOTSTRAP_DIR/"
 
         chown -R "$BOOTSTRAP_USER:$BOOTSTRAP_USER" "$BOOTSTRAP_DIR"
 
-        if [ -f "$SCRIPT_DIR/.env" ]; then
+        if [ "$COPY_ENV" = true ]; then
             install -m 600 -o "$BOOTSTRAP_USER" -g "$BOOTSTRAP_USER" "$SCRIPT_DIR/.env" "$BOOTSTRAP_DIR/.env"
             echo ".env copied to $BOOTSTRAP_DIR/.env"
             if command -v sha256sum >/dev/null 2>&1; then
@@ -138,9 +172,10 @@ case "$1" in
         elif [ -f "$BOOTSTRAP_DIR/.env" ]; then
             chown "$BOOTSTRAP_USER:$BOOTSTRAP_USER" "$BOOTSTRAP_DIR/.env"
             chmod 600 "$BOOTSTRAP_DIR/.env"
-            echo "No .env found in $SCRIPT_DIR; keeping existing $BOOTSTRAP_DIR/.env"
+            echo "Existing $BOOTSTRAP_DIR/.env preserved (use --copy-env to replace it)."
         else
-            echo "Warning: no .env found in $SCRIPT_DIR or $BOOTSTRAP_DIR"
+            echo "Warning: $BOOTSTRAP_DIR/.env does not exist."
+            echo "Create it manually or rerun bootstrap with --copy-env."
         fi
 
         sudo -u "$BOOTSTRAP_USER" python3 -m venv "$BOOTSTRAP_DIR/.venv"
@@ -152,8 +187,9 @@ case "$1" in
         FROZBOT_PYTHON="$BOOTSTRAP_DIR/.venv/bin/python" \
             bash "$BOOTSTRAP_DIR/deploy.sh" install
 
-        systemctl enable --now "$SERVICE_NAME"
-        echo "FrozBot bootstrapped and started."
+        systemctl enable "$SERVICE_NAME"
+        systemctl restart "$SERVICE_NAME"
+        echo "FrozBot bootstrapped and restarted."
         echo "Check status with: systemctl status $SERVICE_NAME"
         echo "View logs with: journalctl -u $SERVICE_NAME -n 50 -f"
         ;;
@@ -191,10 +227,12 @@ case "$1" in
         install_service
         ;;
     *)
-        echo "Usage: $0 {bootstrap|install|start|stop|restart|status|logs|refresh}"
+        echo "Usage: $0 bootstrap [--copy-env]"
+        echo "       $0 {install|start|stop|restart|status|logs|refresh}"
         echo ""
         echo "Commands:"
-        echo "  bootstrap - Create service user, install to /opt/frozbot, and start"
+        echo "  bootstrap - Deploy to /opt/frozbot, preserving .env and runtime data"
+        echo "              Use --copy-env to replace the deployed .env from this checkout"
         echo "  install   - Install the systemd service for this checkout"
         echo "  start    - Start and enable the bot service"
         echo "  stop     - Stop and disable the bot service"

@@ -7,11 +7,16 @@ from typing import Optional
 
 import discord
 
-from attachments import ImageValidationError, read_validated_attachment
+from attachments import (
+    MediaValidationError,
+    is_supported_media_attachment,
+    read_validated_media_attachment,
+)
 import config
 from context import build_ask_context
 from database import is_banned
-from llm import get_llm_client
+from llm import get_llm_client, get_llm_provider
+from llm_providers.base import BinaryMediaPart
 from request_queue import (
     RequestType,
     add_request_to_queue,
@@ -164,30 +169,41 @@ def setup_handlers(client: discord.Client, tree: discord.app_commands.CommandTre
 
         # Show typing indicator while processing
         async with message.channel.typing():
-            # Prepare optional image media part
-            media_parts: Optional[list] = None
+            # Prepare optional multimodal media parts
+            media_parts: list = []
             try:
                 for attachment in message.attachments:
-                    if attachment.content_type and attachment.content_type.startswith("image/"):
-                        pil_img = await read_validated_attachment(
-                            attachment,
-                            source_name="mention_attachment",
+                    if not is_supported_media_attachment(attachment):
+                        continue
+                    media_part = await read_validated_media_attachment(
+                        attachment,
+                        source_name="mention_attachment",
+                    )
+                    provider = get_llm_provider()
+                    media_type = (
+                        media_part.mime_type
+                        if isinstance(media_part, BinaryMediaPart)
+                        else "image/jpeg"
+                    )
+                    if provider and not provider.supports_media_type(media_type):
+                        media_kind = media_type.split("/", 1)[0]
+                        raise MediaValidationError(
+                            f"The configured provider does not support {media_kind} input."
                         )
-                        media_parts = [pil_img]
-                        break
-            except ImageValidationError as e:
-                await message.reply(f"❌ Invalid image attachment: {e}")
+                    media_parts.append(media_part)
+            except MediaValidationError as e:
+                await message.reply(f"❌ Invalid media attachment: {e}")
                 return
             except Exception as e:
                 logger.exception(
-                    "mention_image_attachment_error",
+                    "mention_media_attachment_error",
                     extra={
                         "user_id": message.author.id,
                         "error_type": type(e).__name__,
                     },
                 )
                 await message.reply(
-                    "❌ Invalid image attachment: the image could not be processed."
+                    "❌ Invalid media attachment: the attachment could not be processed."
                 )
                 return
 
@@ -208,7 +224,7 @@ def setup_handlers(client: discord.Client, tree: discord.app_commands.CommandTre
                 built_context.context_string,
                 message.author.id,
                 priority=1 if config.is_owner(message.author.id) else 0,
-                media_parts=media_parts,
+                media_parts=media_parts or None,
             )
 
             logger.info(

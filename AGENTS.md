@@ -13,7 +13,7 @@ This file is the primary orientation document for future coding agents. Keep it 
 1. Check current state with `git status --short`.
 2. Read this file, then inspect the specific modules you will touch.
 3. Do not read `.env`, `database.db`, `venv/`, `.venv/`, `temp_media/`, or generated caches unless the task explicitly requires it.
-4. Avoid live Discord, Gemini, Mistral, xAI, ElevenLabs, or FFmpeg calls unless the user asks for integration testing.
+4. Avoid live Discord, Gemini, Mistral, xAI, OpenRouter, ElevenLabs, or FFmpeg calls unless the user asks for integration testing.
 5. Prefer small, local verification:
    - `python -m compileall -q .`
    - `python -m unittest discover -s tests`
@@ -26,7 +26,7 @@ This file is the primary orientation document for future coding agents. Keep it 
 - `discord.py` for Discord client, app commands, messages, views, and interactions
 - Provider-based LLM layer under `llm_providers/`
 - SQLite file storage through `database.py`
-- Pillow for image inputs and generated image handling
+- Pillow for validated image inputs and generated image handling; validated audio/video inputs are forwarded as bounded binary media
 - ElevenLabs for TTS, plus an external `ffmpeg` executable for MP3 to OGG/Opus conversion
 
 Required environment:
@@ -36,12 +36,13 @@ Required environment:
 - `GEMINI_API_KEY` when `LLM_PROVIDER=gemini`
 - `MISTRAL_API_KEY` when `LLM_PROVIDER=mistral`
 - `XAI_API_KEY` when `LLM_PROVIDER=xai`
+- `OPENROUTER_API_KEY` when `LLM_PROVIDER=openrouter`
 
 Important optional environment:
 
 - `DISCORD_GUILD_ID` for guild-scoped command sync
 - `DEV_SERVER_ID` for dev-only admin commands
-- `LLM_PROVIDER`, currently `gemini`, `mistral`, or `xai`
+- `LLM_PROVIDER`, currently `gemini`, `mistral`, `xai`, or `openrouter`
 - `ELEVENLABS_API_KEY` and `ELEVENLABS_VOICE_ID`
 - `ASK_ENABLE`, `IMAGINE_ENABLE`, `REQUIRE_EXPLICIT_MENTION`
 - seconds-based cooldown, context-depth, and channel-summary variables in `config.env.example`
@@ -49,13 +50,15 @@ Important optional environment:
 - `REQUEST_DELAY_SECONDS`, `MAX_CONCURRENT_REQUESTS`, `LOG_LEVEL`, `MAX_IMAGE_ATTACHMENT_BYTES`, `MAX_IMAGE_PIXELS`, `ALLOWED_IMAGE_FORMATS`
 - `MISTRAL_TEXT_MODELS`, `MISTRAL_VISION_MODELS`, `MISTRAL_TIMEOUT_SECONDS`
 - `MISTRAL_IMAGE_AGENT_ID` for Mistral `/imagine` support through a Mistral image-generation agent
+- `OPENROUTER_TEXT_MODELS`, `OPENROUTER_MULTIMODAL_MODELS`, `OPENROUTER_AUDIO_MODELS`, `OPENROUTER_IMAGE_MODELS`, `OPENROUTER_TIMEOUT_SECONDS`
+- `MAX_AUDIO_ATTACHMENT_BYTES`, `MAX_VIDEO_ATTACHMENT_BYTES`, `ALLOWED_AUDIO_FORMATS`, `ALLOWED_VIDEO_FORMATS`
 
 ## Architecture Map
 
 - `bot.py`: Creates the Discord client, command tree, database tables, commands, handlers, and runs the bot.
 - `config.py`: Loads environment variables and owns mutable runtime state such as cooldowns, retry caches, channel-summary cache, and the request queue.
 - `commands/`: Registers slash commands by feature area.
-  - `ask.py`: `/ask`, context assembly for slash commands, optional image and TTS.
+  - `ask.py`: `/ask`, context assembly for slash commands, optional image/audio/video input and TTS.
   - `summarize.py`: `/summarize`, recent channel conversation summaries using the shared summary helper.
   - `imagine.py`: `/imagine`, image generation, optional prompt reference images and mentioned-user avatars.
   - `memory.py`: `/setmemory`, `/getmemory`, `/deletememory`.
@@ -65,12 +68,12 @@ Important optional environment:
 - `context.py`: Shared context construction for `/ask`, mention chat, and `/summarize`; recent messages with display name/username/user ID, channel summaries, user/member info, replied-message context, memories, and trusted/untrusted prompt sections.
 - `request_queue.py`: Backend-only priority-aware worker queue for ask/retry requests, UUID request IDs, worker concurrency, owner status/cleanup support, and response delivery. Do not expose queue position/status to normal users.
 - `llm.py`: Provider-neutral facade around the provider system.
-- `llm_providers/`: Provider abstraction, provider registry, and concrete Gemini/Mistral/xAI implementations.
+- `llm_providers/`: Provider abstraction, provider registry, and concrete Gemini/Mistral/xAI/OpenRouter implementations.
 - `llm_providers/execution.py`: Shared executor, timeout, retry, and logging helper for blocking provider SDK calls.
-- `attachments.py`: Defensive image validation for Discord attachments and avatar bytes.
+- `attachments.py`: Defensive image/audio/video validation for Discord attachments and avatar bytes.
 - `emoji.py`: Guild custom emoji discovery, replacement, and debug output.
 - `eleven.py`: ElevenLabs TTS and FFmpeg conversion.
-- `retry.py`: Persistent retry records plus temporary persisted image files for retry buttons.
+- `retry.py`: Persistent retry records plus temporary persisted media files for retry buttons.
 - `database.py`: Synchronous SQLite helpers for bans and channel-scoped memories. User memories store stable Discord user IDs plus display names when available, with legacy username fallback.
 - `views.py`: Discord UI views, currently memory pagination.
 - `iq.py`: Pure deterministic entertainment IQ calculation.
@@ -82,14 +85,16 @@ Important optional environment:
 - The Gemini provider uses `google-genai>=2.3.0` and the Interactions API (`client.interactions.create`) with `store=False`. Do not reintroduce deprecated `google-generativeai` or `models.generate_content` paths unless intentionally adding a compatibility layer.
 - Gemini text/chat and image-generation fallback models are configurable through `GEMINI_TEXT_IMAGE_MODELS` and `GEMINI_IMAGE_MODELS`; do not hard-code assumptions about the project's billing tier.
 - The Mistral provider uses `mistralai>=2.0.0`, chat completions for text and vision input, and an optional configured image-generation agent for `/imagine`. Do not auto-create remote Mistral agents during normal bot requests.
+- The OpenRouter provider uses the native async `openrouter` SDK. Its text and multimodal model fallbacks are configurable separately; `/imagine` is enabled only when `OPENROUTER_IMAGE_MODELS` is set. MiniMax M3 Free is the default and currently supports text/image/video input with text output, not audio input.
 - Slash command registration is config-sensitive at sync time. `ASK_ENABLE` and `IMAGINE_ENABLE` hide commands when false, and TTS options are omitted when ElevenLabs is not configured.
 - Keep slash-command `/ask` and mention-based chat behavior aligned through `context.build_ask_context()`.
+- Keep the shared ask persona irreverent and concise: normal replies default to 1–3 direct sentences, with casual profanity, dark humor, sarcasm, and playful roasting permitted, while retaining the explicit prohibitions on slurs, protected-group attacks, and racial stereotyping.
 - Always defer Discord interactions before long work such as history reads, LLM calls, image processing, TTS, or network fetches.
 - Never call blocking SDK/network work directly on the event loop. Existing provider code uses executors around blocking clients.
 - Keep user-visible Discord messages within the 2000-character limit or use attachments/files when appropriate.
 - Keep owner-only commands guarded with `config.is_owner()`.
 - Keep memory behavior channel-scoped. User-targeted memories should use stable Discord user IDs when available while preserving readable display names/usernames in LLM context.
-- Validate image inputs through `attachments.py` before model use; do not pass unverified attachment bytes directly to providers.
+- Validate image/audio/video inputs through `attachments.py` before model use; do not pass unverified attachment bytes directly to providers.
 - Avoid adding persistent state to globals unless it belongs in `config.py` and has a clear lifecycle.
 - Do not commit secrets, local databases, virtual environments, generated media, or generated agent artifacts.
 - Do not run the bot with `python bot.py` as a verification step unless the user explicitly wants a live run.
@@ -129,6 +134,6 @@ When adding tests:
 
 - Slash command sync happens in `handlers.on_ready()`. `DISCORD_GUILD_ID` gives fast guild sync; otherwise global sync can take up to an hour.
 - `DEV_SERVER_ID` controls dev-only command registration via `config.IS_DEV_SERVER_COMMAND`.
+- `deploy.sh bootstrap` deploys to `/opt/frozbot`, preserves `.env`, `database.db`, `temp_media/`, virtual environments, caches, coverage output, and logs by default, reinstalls dependencies, and restarts the service. Use `bootstrap --copy-env` only to intentionally replace the deployed `.env`.
 - `database.db` is local runtime data and is intentionally ignored by git.
 - `temp_media/` is runtime retry media and should remain ignored.
-

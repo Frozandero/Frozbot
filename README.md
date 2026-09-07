@@ -11,7 +11,7 @@ A Discord bot that provides IQ calculation and AI chat functionality through a c
 - Rate limiting and priority-aware request queuing system
 - Backend request queue with concurrent workers and owner cleanup
 - Retry buttons that persist retry context across bot restarts while they are unexpired
-- Defensive image attachment validation before model calls
+- Defensive image, audio, and video attachment validation before model calls
 - Structured JSON logs with request IDs, provider/model fields, and token usage
 - Owner-only configuration commands
 - Implemented as slash commands: `/iq`, `/ask`, `/config`, etc.
@@ -21,9 +21,10 @@ A Discord bot that provides IQ calculation and AI chat functionality through a c
 - A Discord application and bot token with the following OAuth2 scopes when inviting:
   - `bot`
   - `applications.commands`
-- Gemini, Mistral, or xAI API key for AI chat functionality, depending on `LLM_PROVIDER`
+- Gemini, Mistral, xAI, or OpenRouter API key for AI chat functionality, depending on `LLM_PROVIDER`
 - `google-genai>=2.3.0` is required for Gemini's Interactions API
 - `mistralai>=2.0.0` is required for Mistral chat, vision, and optional image-generation-agent support
+- `openrouter>=1.1.113` is required for OpenRouter chat and multimodal support
 
 ### Setup
 1. Clone or open this project.
@@ -56,6 +57,7 @@ A Discord bot that provides IQ calculation and AI chat functionality through a c
    GEMINI_API_KEY=your-gemini-api-key-here
    # or use LLM_PROVIDER=mistral with MISTRAL_API_KEY
    # or use LLM_PROVIDER=xai with XAI_API_KEY
+   # or use LLM_PROVIDER=openrouter with OPENROUTER_API_KEY
    # Optional: provide a test guild ID to sync commands instantly in one server
    # If omitted, commands are synced globally (can take up to 1 hour to appear)
    # DISCORD_GUILD_ID=123456789012345678
@@ -72,11 +74,20 @@ python bot.py
 - If `DISCORD_GUILD_ID` is set, commands appear almost immediately in that server.
 - If not set, commands sync globally and may take up to ~1 hour to appear.
 
+For an Ubuntu/Debian systemd deployment, the first bootstrap can copy the
+checkout's `.env` explicitly, while later redeploys preserve deployed secrets
+and runtime state by default:
+```bash
+sudo bash deploy.sh bootstrap --copy-env  # first deployment
+sudo bash deploy.sh bootstrap             # later code redeploys
+```
+See `DEPLOYMENT.md` for service management and override options.
+
 ### Commands
 
 #### User Commands
 - `/iq [user]` - Get the IQ of a user (or yourself if no user specified)
-- `/ask <question>` - Ask the bot a question using AI
+- `/ask <question> [image] [audio] [video]` - Ask the bot a question using AI, optionally with multimodal attachments supported by the configured provider/model
 - `/summarize [depth] [refresh]` - Summarize recent messages in the current channel
 - `/imagine <prompt> [image]` - Generate an image from a text prompt when the configured provider supports image generation and the configured account has access. Optionally include an image for reference/modification.
 
@@ -95,17 +106,19 @@ The bot supports several configurable parameters that can be set via environment
 - **Message History Search Depth**: How far back to search in channel history (default: 1000)
 - **Ask Command Cooldown**: Rate limiting for non-owner users via `ASK_COMMAND_COOLDOWN_SECONDS` (default: 1800 seconds)
 - **Imagine Command Cooldown**: Rate limiting for non-owner users via `IMAGINE_COMMAND_COOLDOWN_SECONDS` (default: 900 seconds)
-- **LLM Provider**: Set `LLM_PROVIDER` to `gemini`, `mistral`, or `xai`.
+- **LLM Provider**: Set `LLM_PROVIDER` to `gemini`, `mistral`, `xai`, or `openrouter`.
 - **Mistral Models**: Override `MISTRAL_TEXT_MODELS` and `MISTRAL_VISION_MODELS` for text and `/ask` image-input fallback order.
 - **Mistral Image Generation**: Set `MISTRAL_IMAGE_AGENT_ID` to a Mistral agent that has the `image_generation` tool enabled if you want `/imagine` with Mistral.
+- **OpenRouter Models**: Override `OPENROUTER_TEXT_MODELS` and `OPENROUTER_MULTIMODAL_MODELS` with comma-separated fallback lists. Both default to `minimax/minimax-m3:free`. Configure `OPENROUTER_AUDIO_MODELS` separately for an audio-capable model.
+- **OpenRouter Image Generation**: Set `OPENROUTER_IMAGE_MODELS` to one or more image-output model slugs to enable `/imagine`; MiniMax M3 Free is text-output only.
 - **Queue Concurrency**: Set `MAX_CONCURRENT_REQUESTS` and `REQUEST_DELAY_SECONDS` to control worker count and pacing.
-- **Image Input Limits**: Set `MAX_IMAGE_ATTACHMENT_BYTES`, `MAX_IMAGE_PIXELS`, and `ALLOWED_IMAGE_FORMATS` to constrain user-provided images.
+- **Media Input Limits**: Image inputs use `MAX_IMAGE_ATTACHMENT_BYTES`, `MAX_IMAGE_PIXELS`, and `ALLOWED_IMAGE_FORMATS`. Audio/video inputs use their corresponding `MAX_*_ATTACHMENT_BYTES` and `ALLOWED_*_FORMATS` settings.
 - **Logging**: Set `LOG_LEVEL` to control structured JSON logs. Context text is logged as length/hash metadata, not previews.
 
 ### Notes
 - This bot requires the Message Content intent for AI chat functionality.
 - The IQ is not meant to be real or serious; it is purely for entertainment.
-- AI responses are context-aware and include server, user, and message history information.
+- AI responses are context-aware and include server, user, and message history information. The shared ask persona defaults to 1–3 direct sentences and favors irreverent humor, sarcasm, and playful roasting while prohibiting slurs and attacks on protected groups.
 - `/ask`, mention chat, and `/summarize` share the channel summary helpers. Ask-style prompts separate stable bot policy from untrusted Discord context.
 - Rate limiting applies to non-owner users to prevent spam.
 - Deprecated `ASK_COMMAND_COOLDOWN_MINUTES` and `IMAGINE_COMMAND_COOLDOWN_MINUTES` values are converted to seconds at startup with a warning. Use the `*_SECONDS` names going forward.
@@ -117,3 +130,5 @@ The bot supports several configurable parameters that can be set via environment
 - Gemini text/chat and image-generation fallback models can be overridden with `GEMINI_TEXT_IMAGE_MODELS` and `GEMINI_IMAGE_MODELS`.
 - Mistral text/chat and `/ask` image-input fallback models can be overridden with `MISTRAL_TEXT_MODELS` and `MISTRAL_VISION_MODELS`.
 - Mistral `/imagine` requires `MISTRAL_IMAGE_AGENT_ID`; otherwise Mistral is treated as chat and vision-input only.
+- OpenRouter uses its native async Python SDK. It accepts validated image, audio, and video payloads for models that advertise those modalities, and its dedicated image API backs `/imagine` when `OPENROUTER_IMAGE_MODELS` is configured.
+- `minimax/minimax-m3:free` currently advertises text, image, and video input with text output. It does not advertise audio input, despite the OpenRouter provider being able to encode audio for other compatible models.

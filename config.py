@@ -124,6 +124,18 @@ MAX_IMAGE_ATTACHMENT_BYTES: int = int(
 )
 MAX_IMAGE_PIXELS: int = int(os.getenv("MAX_IMAGE_PIXELS", "16000000"))
 ALLOWED_IMAGE_FORMATS: str = os.getenv("ALLOWED_IMAGE_FORMATS", "JPEG,PNG,WEBP,GIF")
+MAX_AUDIO_ATTACHMENT_BYTES: int = int(
+    os.getenv("MAX_AUDIO_ATTACHMENT_BYTES", str(20 * 1024 * 1024))
+)
+MAX_VIDEO_ATTACHMENT_BYTES: int = int(
+    os.getenv("MAX_VIDEO_ATTACHMENT_BYTES", str(25 * 1024 * 1024))
+)
+ALLOWED_AUDIO_FORMATS: str = os.getenv(
+    "ALLOWED_AUDIO_FORMATS", "MP3,WAV,AIFF,AAC,OGG,FLAC,M4A"
+)
+ALLOWED_VIDEO_FORMATS: str = os.getenv(
+    "ALLOWED_VIDEO_FORMATS", "MP4,MPEG,MOV,WEBM"
+)
 
 # ============================================================================
 # GLOBAL STATE (Mutable runtime state)

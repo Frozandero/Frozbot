@@ -38,6 +38,12 @@ def _create_xai_provider(api_key: str) -> LLMProvider:
     return XAIProvider(api_key)
 
 
+def _create_openrouter_provider(api_key: str) -> LLMProvider:
+    from .openrouter import OpenRouterProvider
+
+    return OpenRouterProvider(api_key)
+
+
 PROVIDER_REGISTRY: dict[str, ProviderRegistration] = {
     "gemini": ProviderRegistration(
         name="gemini",
@@ -53,6 +59,11 @@ PROVIDER_REGISTRY: dict[str, ProviderRegistration] = {
         name="xai",
         api_key_env="XAI_API_KEY",
         factory=_create_xai_provider,
+    ),
+    "openrouter": ProviderRegistration(
+        name="openrouter",
+        api_key_env="OPENROUTER_API_KEY",
+        factory=_create_openrouter_provider,
     ),
 }
 

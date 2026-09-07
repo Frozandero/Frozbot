@@ -7,11 +7,12 @@ from typing import Optional
 import discord
 from discord import app_commands
 
-from attachments import ImageValidationError, read_validated_attachment
+from attachments import MediaValidationError, read_validated_media_attachment
 import config
 from context import build_ask_context
 from database import is_banned
-from llm import get_llm_client
+from llm import get_llm_client, get_llm_provider
+from llm_providers.base import BinaryMediaPart
 from eleven import get_eleven_client
 from request_queue import (
     RequestType,
@@ -33,6 +34,8 @@ def setup_ask_commands(tree: app_commands.CommandTree, client: discord.Client):
         interaction: discord.Interaction,
         question: str,
         image: Optional[discord.Attachment] = None,
+        audio: Optional[discord.Attachment] = None,
+        video: Optional[discord.Attachment] = None,
         tts: Optional[bool] = False,
     ) -> None:
         if not config.ASK_ENABLE:
@@ -133,28 +136,44 @@ def setup_ask_commands(tree: app_commands.CommandTree, client: discord.Client):
             )
             return
 
-        # Prepare optional image media part
-        media_parts: Optional[list] = None
+        # Prepare optional multimodal media parts
+        media_parts: list = []
         try:
-            if image:
-                pil_img = await read_validated_attachment(
-                    image,
-                    source_name="ask_attachment",
+            for media_kind, attachment in (
+                ("image", image),
+                ("audio", audio),
+                ("video", video),
+            ):
+                if not attachment:
+                    continue
+                media_part = await read_validated_media_attachment(
+                    attachment,
+                    source_name=f"ask_{media_kind}_attachment",
                 )
-                media_parts = [pil_img]
-        except ImageValidationError as e:
+                provider = get_llm_provider()
+                media_type = (
+                    media_part.mime_type
+                    if isinstance(media_part, BinaryMediaPart)
+                    else "image/jpeg"
+                )
+                if provider and not provider.supports_media_type(media_type):
+                    raise MediaValidationError(
+                        f"The configured provider does not support {media_kind} input."
+                    )
+                media_parts.append(media_part)
+        except MediaValidationError as e:
             await interaction.followup.send(
-                f"❌ **Invalid image attachment**\n\n{e}",
+                f"❌ **Invalid media attachment**\n\n{e}",
                 ephemeral=True,
             )
             return
         except Exception as e:
             logger.exception(
-                "ask_image_attachment_error",
+                "ask_media_attachment_error",
                 extra={"user_id": user_id, "error_type": type(e).__name__},
             )
             await interaction.followup.send(
-                "❌ **Invalid image attachment**\n\nThe image could not be processed.",
+                "❌ **Invalid media attachment**\n\nThe attachment could not be processed.",
                 ephemeral=True,
             )
             return
@@ -175,7 +194,7 @@ def setup_ask_commands(tree: app_commands.CommandTree, client: discord.Client):
             built_context.context_string,
             user_id,
             priority=1 if config.is_owner(user_id) else 0,
-            media_parts=media_parts,
+            media_parts=media_parts or None,
             tts=tts if tts else False,
         )
 
@@ -193,14 +212,32 @@ def setup_ask_commands(tree: app_commands.CommandTree, client: discord.Client):
             interaction: discord.Interaction,
             question: str,
             image: Optional[discord.Attachment] = None,
+            audio: Optional[discord.Attachment] = None,
+            video: Optional[discord.Attachment] = None,
             tts: Optional[bool] = False,
         ) -> None:
-            await _handle_ask_command(interaction, question, image, tts)
+            await _handle_ask_command(
+                interaction,
+                question,
+                image=image,
+                audio=audio,
+                video=video,
+                tts=tts,
+            )
     else:
         @tree.command(name="ask", description="Ask the bot a question.", guild=None)
         async def ask_command(
             interaction: discord.Interaction,
             question: str,
             image: Optional[discord.Attachment] = None,
+            audio: Optional[discord.Attachment] = None,
+            video: Optional[discord.Attachment] = None,
         ) -> None:
-            await _handle_ask_command(interaction, question, image, False)
+            await _handle_ask_command(
+                interaction,
+                question,
+                image=image,
+                audio=audio,
+                video=video,
+                tts=False,
+            )
