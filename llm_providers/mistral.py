@@ -30,9 +30,10 @@ except ImportError:
 
 
 DEFAULT_MISTRAL_TEXT_MODELS = [
-    "mistral-large-latest",
     "mistral-medium-latest",
     "mistral-small-latest",
+    "ministral-14b-latest",
+    "ministral-8b-latest",
 ]
 
 
@@ -79,9 +80,7 @@ def _extract_token_usage(response: object) -> TokenUsage:
 
     return TokenUsage(
         input_tokens=(
-            _get_value(usage, "prompt_tokens")
-            or _get_value(usage, "input_tokens")
-            or 0
+            _get_value(usage, "prompt_tokens") or _get_value(usage, "input_tokens") or 0
         ),
         output_tokens=(
             _get_value(usage, "completion_tokens")
@@ -128,7 +127,9 @@ def _iter_content_chunks(content: object) -> list[object]:
     return [content]
 
 
-def _extract_image_generation_outputs(response: object) -> tuple[Optional[str], Optional[str]]:
+def _extract_image_generation_outputs(
+    response: object,
+) -> tuple[Optional[str], Optional[str]]:
     text_parts: list[str] = []
     file_id: Optional[str] = None
 
@@ -480,6 +481,7 @@ class MistralProvider(LLMProvider):
         client = self._get_client()
 
         try:
+
             def call_mistral_image_api():
                 return client.beta.conversations.start(
                     agent_id=self.image_agent_id,
