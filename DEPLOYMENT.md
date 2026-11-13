@@ -2,7 +2,7 @@
 
 ## Prerequisites
 - Ubuntu/Debian VPS with systemd
-- Python 3.10+ installed
+- Python 3.12+ installed
 - Your Discord bot token and configuration
 
 ## Setup Steps

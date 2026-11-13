@@ -46,6 +46,9 @@ REQUIRE_EXPLICIT_MENTION: bool = (
     os.getenv("REQUIRE_EXPLICIT_MENTION", "false").lower() == "true"
 )
 
+# Overall ask/retry deadline, including agent tool calls and model fallbacks.
+ASK_REQUEST_TIMEOUT_SECONDS: float = max(1.0, float(os.getenv("ASK_REQUEST_TIMEOUT_SECONDS", "180")))
+
 # Rate limiting settings
 CONFIG_DEPRECATION_WARNINGS: list[str] = []
 

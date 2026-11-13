@@ -3,6 +3,7 @@ import base64
 import importlib.util
 import unittest
 from types import SimpleNamespace
+from unittest.mock import AsyncMock, patch
 
 
 @unittest.skipUnless(
@@ -10,80 +11,139 @@ from types import SimpleNamespace
     "Pillow is required for Mistral provider image tests",
 )
 class MistralProviderTests(unittest.TestCase):
-    def test_generate_response_uses_chat_payload_and_usage(self):
+    def _run_with_sdk(self, question="question", media=None, search=False, fail_search=False):
+        from mistralai import agents
         from llm_providers.mistral import MistralProvider
+        import os
 
-        calls = []
-
-        class FakeChat:
-            def complete(self, **kwargs):
-                calls.append(kwargs)
-                return SimpleNamespace(
-                    choices=[
-                        SimpleNamespace(
-                            message=SimpleNamespace(content="hello from mistral")
-                        )
-                    ],
-                    usage=SimpleNamespace(prompt_tokens=11, completion_tokens=7),
-                )
-
-        provider = MistralProvider("test-key", text_models=["mistral-test"])
-        provider._client = SimpleNamespace(chat=FakeChat())
-
-        text, usage = asyncio.run(
-            provider.generate_response("question", "system prompt", None)
+        captured = {}
+        completed = agents.Completed(
+            session_id="session", turn_id="turn", cursor="cursor", text="verified answer",
+            output="verified answer",
         )
+        session = SimpleNamespace(cancel=AsyncMock())
 
-        self.assertEqual(text, "hello from mistral")
+        async def run(content):
+            captured["content"] = content
+            await captured["hooks"][0].post_llm_call(None, SimpleNamespace(
+                usage=SimpleNamespace(input_tokens=11, output_tokens=7)))
+            if search:
+                result = await captured["tools"][0](query="game release official announcement")
+                captured["evidence"] = result
+            return completed
+
+        session.run = run
+        real_agent = agents.Agent
+
+        def make_agent(**kwargs):
+            # Validate the actual pinned SDK constructor without making a network call.
+            real_agent(**kwargs)
+            captured.update(kwargs)
+            return SimpleNamespace(start_session=AsyncMock(return_value=session))
+
+        response = SimpleNamespace(outputs=[SimpleNamespace(
+            type="message.output", role="assistant", content=[
+                {"type": "text", "text": "Official announcement: a new release date."},
+                {"type": "tool_reference", "url": "https://example.com/announcement"},
+            ])], usage=SimpleNamespace(prompt_tokens=5, completion_tokens=3))
+        search_api = AsyncMock(return_value=response)
+        if fail_search:
+            search_api.side_effect = RuntimeError("unavailable")
+        with patch.dict(os.environ, {"MISTRAL_WEB_SEARCH_ENABLE": "true"}):
+            provider = MistralProvider("test-key", text_models=["mistral-test"], vision_models=["vision-test"])
+        provider._client = SimpleNamespace(beta=SimpleNamespace(conversations=SimpleNamespace(start_async=search_api)))
+        with patch.object(agents, "Agent", side_effect=make_agent):
+            result = asyncio.run(provider.generate_response(question, "persona and memories", media))
+        return result, captured, session, search_api
+
+    def test_agent_search_preserves_context_citations_and_aggregates_usage(self):
+        (text, usage), captured, session, search_api = self._run_with_sdk(search=True)
+        self.assertIn("https://example.com/announcement", text)
+        self.assertIn("Official announcement", captured["evidence"])
+        self.assertIn("persona and memories", captured["instructions"])
+        self.assertIn("release dates", captured["instructions"])
+        self.assertEqual((usage.input_tokens, usage.output_tokens), (16, 10))
+        self.assertFalse(search_api.call_args.kwargs["store"])
+        self.assertEqual(search_api.call_args.kwargs["tools"], [{"type": "web_search"}])
+        session.cancel.assert_awaited_once()
+
+    def test_casual_chat_does_not_force_search(self):
+        (text, usage), captured, session, search_api = self._run_with_sdk()
+        self.assertEqual(text, "verified answer")
+        self.assertEqual(captured["content"], "question")
         self.assertEqual(usage.input_tokens, 11)
-        self.assertEqual(usage.output_tokens, 7)
-        self.assertEqual(calls[0]["model"], "mistral-test")
-        self.assertEqual(
-            calls[0]["messages"],
-            [
-                {"role": "system", "content": "system prompt"},
-                {"role": "user", "content": "question"},
-            ],
-        )
-        self.assertEqual(calls[0]["temperature"], 0.9)
+        search_api.assert_not_awaited()
 
-    def test_generate_response_converts_images_to_vision_content(self):
+    def test_search_failure_returns_explicit_uncertainty_to_agent(self):
+        _, captured, _, _ = self._run_with_sdk(search=True, fail_search=True)
+        self.assertIn("could not be verified", captured["evidence"])
+        self.assertIn("do not guess", captured["evidence"])
+
+    def test_agent_converts_validated_image_for_sdk(self):
         from PIL import Image
+        _, captured, _, _ = self._run_with_sdk(media=[Image.new("RGB", (1, 1))])
+        self.assertEqual(captured["model"], "vision-test")
+        self.assertEqual(captured["content"][1]["type"], "image")
+        self.assertTrue(captured["content"][1]["uri"].startswith("data:image/jpeg;base64,"))
 
+    def test_real_sdk_harness_executes_request_scoped_search_without_network(self):
+        from mistralai import agents
         from llm_providers.mistral import MistralProvider
+        from llm_providers.mistral_tools import search_callback
+        model = agents.testing.ScriptedModel([
+            agents.testing.call("web_search", query="official game release date"),
+            agents.testing.reply("Confirmed by the official announcement."),
+        ])
+        real_agent = agents.Agent
+        def scripted_agent(**kwargs):
+            return real_agent(**kwargs).override(model=model)
+        search_api = AsyncMock(return_value=SimpleNamespace(outputs=[{
+            "type": "message.output", "content": [
+                {"type": "text", "text": "Official release date announcement"},
+                {"type": "tool_reference", "url": "https://example.com/official"},
+            ],
+        }]))
+        provider = MistralProvider("key", text_models=["test"])
+        provider._client = SimpleNamespace(beta=SimpleNamespace(conversations=SimpleNamespace(start_async=search_api)))
+        with patch.object(agents, "Agent", side_effect=scripted_agent), patch(
+            "httpx.AsyncClient.send", new=AsyncMock(side_effect=RuntimeError("network disabled in tests"))
+        ):
+            text, _ = asyncio.run(provider.generate_response("When is the game out?", "persona"))
+        self.assertIn("https://example.com/official", text)
+        model.assert_consumed()
+        search_api.assert_awaited_once()
+        self.assertIsNone(search_callback.get())
 
-        calls = []
+    def test_fallback_and_timeout_cancel_session(self):
+        from mistralai import agents
+        from llm_providers.mistral import MistralProvider
+        provider = MistralProvider("key", text_models=["first", "second"], timeout_seconds=0.02)
+        provider._client = SimpleNamespace()
+        sessions = []
 
-        class FakeChat:
-            def complete(self, **kwargs):
-                calls.append(kwargs)
-                return SimpleNamespace(
-                    choices=[
-                        SimpleNamespace(message=SimpleNamespace(content="saw image"))
-                    ],
-                    usage=None,
-                )
+        async def slow_run(content):
+            await asyncio.sleep(1)
 
-        provider = MistralProvider(
-            "test-key",
-            text_models=["mistral-text"],
-            vision_models=["mistral-vision"],
-        )
-        provider._client = SimpleNamespace(chat=FakeChat())
-        image = Image.new("RGB", (1, 1), (255, 0, 0))
+        def make_agent(**kwargs):
+            session = SimpleNamespace(run=slow_run, cancel=AsyncMock())
+            sessions.append(session)
+            return SimpleNamespace(start_session=AsyncMock(return_value=session))
 
-        text, _ = asyncio.run(
-            provider.generate_response("describe it", "system prompt", [image])
-        )
+        with patch.object(agents, "Agent", side_effect=make_agent):
+            text, _ = asyncio.run(provider.generate_response("q", "ctx"))
+        self.assertIsNone(text)
+        self.assertEqual(len(sessions), 2)
+        for session in sessions:
+            session.cancel.assert_awaited_once()
 
-        self.assertEqual(text, "saw image")
-        self.assertEqual(calls[0]["model"], "mistral-vision")
-        user_content = calls[0]["messages"][1]["content"]
-        self.assertEqual(user_content[0], {"type": "text", "text": "describe it"})
-        self.assertEqual(user_content[1]["type"], "image_url")
-        self.assertTrue(user_content[1]["image_url"].startswith("data:image/jpeg;base64,"))
-        encoded_image = user_content[1]["image_url"].split(",", 1)[1]
-        self.assertGreater(len(base64.b64decode(encoded_image)), 0)
+    def test_summaries_disable_search(self):
+        from llm_providers.mistral import MistralProvider
+        from llm_providers.base import TokenUsage
+        provider = MistralProvider("key")
+        provider._client = SimpleNamespace()
+        provider.generate_response = AsyncMock(return_value=("summary", TokenUsage()))
+        asyncio.run(provider.summarize_messages("messages"))
+        self.assertFalse(provider.generate_response.call_args.kwargs["allow_search"])
 
     def test_generate_image_uses_configured_agent_and_downloads_file(self):
         from llm_providers.mistral import MistralProvider

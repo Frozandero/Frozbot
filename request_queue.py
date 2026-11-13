@@ -548,6 +548,20 @@ async def _create_retry_button_and_schedule_expiry(
     )
 
 
+def split_discord_response(text: str) -> list[str]:
+    """Keep the complete answer and citations within Discord's message limit."""
+    chunks = []
+    while len(text) > 2000:
+        boundary = text.rfind("\n", 0, 2001)
+        if boundary < 1000:
+            boundary = 2000
+        chunks.append(text[:boundary])
+        text = text[boundary:].lstrip("\n")
+    if text:
+        chunks.append(text)
+    return chunks
+
+
 async def process_ask_request(request: QueuedRequest) -> None:
     """Process an ask request from the queue."""
     is_message_request = request.message is not None
@@ -572,7 +586,7 @@ async def process_ask_request(request: QueuedRequest) -> None:
                 request.media_parts,
                 request_id=request.request_id,
             ),
-            timeout=60.0,
+            timeout=config.ASK_REQUEST_TIMEOUT_SECONDS,
         )
 
         # Always log token usage after request completes
@@ -669,21 +683,13 @@ async def process_ask_request(request: QueuedRequest) -> None:
                         },
                     )
 
-            formatted_response = (
-                formatted_response
-                if len(formatted_response) <= 2000
-                else formatted_response[:1997] + "..."
-            )
-
-            # Send response via appropriate method
-            if is_message_request:
-                await request.message.reply(content=formatted_response)
-            elif files_param:
-                await request.interaction.followup.send(
-                    content=formatted_response, files=files_param
-                )
-            else:
-                await request.interaction.followup.send(content=formatted_response)
+            for index, chunk in enumerate(split_discord_response(formatted_response)):
+                if is_message_request:
+                    await request.message.reply(content=chunk)
+                elif files_param and index == 0:
+                    await request.interaction.followup.send(content=chunk, files=files_param)
+                else:
+                    await request.interaction.followup.send(content=chunk)
 
             logger.info(
                 "ask_request_completed",
@@ -802,7 +808,7 @@ async def process_retry_request(request: QueuedRequest) -> None:
                 request.media_parts,
                 request_id=request.request_id,
             ),
-            timeout=60.0,
+            timeout=config.ASK_REQUEST_TIMEOUT_SECONDS,
         )
 
         # Always log token usage after request completes
@@ -881,18 +887,11 @@ async def process_retry_request(request: QueuedRequest) -> None:
                         },
                     )
 
-            formatted_response = (
-                formatted_response
-                if len(formatted_response) <= 2000
-                else formatted_response[:1997] + "..."
-            )
-
-            if files_param:
-                await request.interaction.followup.send(
-                    content=formatted_response, files=files_param
-                )
-            else:
-                await request.interaction.followup.send(content=formatted_response)
+            for index, chunk in enumerate(split_discord_response(formatted_response)):
+                if files_param and index == 0:
+                    await request.interaction.followup.send(content=chunk, files=files_param)
+                else:
+                    await request.interaction.followup.send(content=chunk)
 
             logger.info(
                 "retry_request_completed",

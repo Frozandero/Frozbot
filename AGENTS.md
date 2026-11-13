@@ -22,7 +22,7 @@ This file is the primary orientation document for future coding agents. Keep it 
 
 ## Runtime
 
-- Python 3.10+
+- Python 3.12+
 - `discord.py` for Discord client, app commands, messages, views, and interactions
 - Provider-based LLM layer under `llm_providers/`
 - SQLite file storage through `database.py`
@@ -48,7 +48,8 @@ Important optional environment:
 - seconds-based cooldown, context-depth, and channel-summary variables in `config.env.example`
 - `ASK_COMMAND_COOLDOWN_SECONDS`, `IMAGINE_COMMAND_COOLDOWN_SECONDS`; deprecated `*_COOLDOWN_MINUTES` env vars are converted to seconds at startup and should not be used in new code
 - `REQUEST_DELAY_SECONDS`, `MAX_CONCURRENT_REQUESTS`, `LOG_LEVEL`, `MAX_IMAGE_ATTACHMENT_BYTES`, `MAX_IMAGE_PIXELS`, `ALLOWED_IMAGE_FORMATS`
-- `MISTRAL_TEXT_MODELS`, `MISTRAL_VISION_MODELS`, `MISTRAL_TIMEOUT_SECONDS`
+- `MISTRAL_TEXT_MODELS`, `MISTRAL_VISION_MODELS`, `MISTRAL_TIMEOUT_SECONDS`, `MISTRAL_WEB_SEARCH_ENABLE`, `MISTRAL_SEARCH_MODEL`
+- `ASK_REQUEST_TIMEOUT_SECONDS` bounds ask/retry execution across provider fallbacks (default 180 seconds)
 - `MISTRAL_IMAGE_AGENT_ID` for Mistral `/imagine` support through a Mistral image-generation agent
 - `OPENROUTER_TEXT_MODELS`, `OPENROUTER_MULTIMODAL_MODELS`, `OPENROUTER_AUDIO_MODELS`, `OPENROUTER_IMAGE_MODELS`, `OPENROUTER_TIMEOUT_SECONDS`, `OPENROUTER_REASONING_EFFORT`
 - `MAX_AUDIO_ATTACHMENT_BYTES`, `MAX_VIDEO_ATTACHMENT_BYTES`, `ALLOWED_AUDIO_FORMATS`, `ALLOWED_VIDEO_FORMATS`
@@ -66,7 +67,7 @@ Important optional environment:
   - `misc.py`: `/iq`, `/say`.
 - `handlers.py`: Discord events, retry-button interactions, mention-based chat, command sync on ready.
 - `context.py`: Shared context construction for `/ask`, mention chat, and `/summarize`; recent messages with display name/username/user ID, channel summaries, user/member info, replied-message context, memories, and trusted/untrusted prompt sections.
-- `request_queue.py`: Backend-only priority-aware worker queue for ask/retry requests, UUID request IDs, worker concurrency, owner status/cleanup support, and response delivery. Do not expose queue position/status to normal users.
+- `request_queue.py`: Backend-only priority-aware worker queue for ask/retry requests, UUID request IDs, worker concurrency, owner status/cleanup support, and response delivery. Long answers are split to retain source citations. Do not expose queue position/status to normal users.
 - `llm.py`: Provider-neutral facade around the provider system.
 - `llm_providers/`: Provider abstraction, provider registry, and concrete Gemini/Mistral/xAI/OpenRouter implementations.
 - `llm_providers/execution.py`: Shared executor, timeout, retry, and logging helper for blocking provider SDK calls.
@@ -84,7 +85,7 @@ Important optional environment:
 - Provider loading is registry-based and lazy. Avoid top-level imports that make one provider's SDK mandatory for all other providers.
 - The Gemini provider uses `google-genai>=2.3.0` and the Interactions API (`client.interactions.create`) with `store=False`. Do not reintroduce deprecated `google-generativeai` or `models.generate_content` paths unless intentionally adding a compatibility layer.
 - Gemini text/chat and image-generation fallback models are configurable through `GEMINI_TEXT_IMAGE_MODELS` and `GEMINI_IMAGE_MODELS`; do not hard-code assumptions about the project's billing tier.
-- The Mistral provider uses `mistralai>=2.0.0`, chat completions for text and vision input, and an optional configured image-generation agent for `/imagine`. Do not auto-create remote Mistral agents during normal bot requests.
+- The Mistral provider uses pinned `mistralai-agents==1.1.0` (Python 3.12+) for text and vision, with a request-local `web_search` tool defined in `llm_providers/mistral_tools.py`. Hosted search uses the documented `mistralai` Conversations API bridge with `store=False`; preserve source URLs and bound tool calls. Summaries disable search. Always cancel SDK sessions on success, failure and timeout. `/imagine` retains its separate legacy configured image-generation agent. Do not auto-create remote Mistral agents during normal bot requests.
 - The OpenRouter provider uses the native async `openrouter` SDK. Its text and multimodal model fallbacks are configurable separately; `/imagine` is enabled only when `OPENROUTER_IMAGE_MODELS` is set. `OPENROUTER_REASONING_EFFORT` controls optional model reasoning, with `none` disabling it when the selected model permits. MiniMax M3 Free is the default and currently supports text/image/video input with text output, not audio input.
 - Slash command registration is config-sensitive at sync time. `ASK_ENABLE` and `IMAGINE_ENABLE` hide commands when false, and TTS options are omitted when ElevenLabs is not configured.
 - Keep slash-command `/ask` and mention-based chat behavior aligned through `context.build_ask_context()`.

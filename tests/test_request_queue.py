@@ -23,6 +23,14 @@ from unittest.mock import patch
     "request queue runtime dependencies are not installed",
 )
 class RequestQueuePriorityTests(unittest.TestCase):
+    def test_split_response_keeps_late_source_urls(self):
+        from request_queue import split_discord_response
+        text = "A" * 2100 + "\nSources:\nhttps://example.com/official"
+        chunks = split_discord_response(text)
+        self.assertTrue(all(0 < len(chunk) <= 2000 for chunk in chunks))
+        self.assertEqual("".join(chunks), text)
+        self.assertIn("https://example.com/official", chunks[-1])
+
     def setUp(self):
         import config
         import request_queue

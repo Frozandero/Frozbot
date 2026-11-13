@@ -17,7 +17,7 @@ A Discord bot that provides IQ calculation and AI chat functionality through a c
 - Implemented as slash commands: `/iq`, `/ask`, `/config`, etc.
 
 ### Prerequisites
-- Python 3.10+
+- Python 3.12+
 - A Discord application and bot token with the following OAuth2 scopes when inviting:
   - `bot`
   - `applications.commands`
@@ -107,6 +107,7 @@ The bot supports several configurable parameters that can be set via environment
 - **Ask Command Cooldown**: Rate limiting for non-owner users via `ASK_COMMAND_COOLDOWN_SECONDS` (default: 1800 seconds)
 - **Imagine Command Cooldown**: Rate limiting for non-owner users via `IMAGINE_COMMAND_COOLDOWN_SECONDS` (default: 900 seconds)
 - **LLM Provider**: Set `LLM_PROVIDER` to `gemini`, `mistral`, `xai`, or `openrouter`.
+- **Mistral Live Information**: Chat and image input use the pinned `mistralai-agents` SDK, with automatic, model-selected web search for changing facts and source URLs in answers. `MISTRAL_WEB_SEARCH_ENABLE=false` disables search; `MISTRAL_SEARCH_MODEL` selects the hosted-search model (defaults to the first text model). The SDK runs locally; its search tool uses Mistral's documented Conversations API bridge with `store=False`, without creating remote agents. Channel summaries never search. Search calls are limited to three per model attempt.
 - **Mistral Models**: Override `MISTRAL_TEXT_MODELS` and `MISTRAL_VISION_MODELS` for text and `/ask` image-input fallback order.
 - **Mistral Image Generation**: Set `MISTRAL_IMAGE_AGENT_ID` to a Mistral agent that has the `image_generation` tool enabled if you want `/imagine` with Mistral.
 - **OpenRouter Models**: Override `OPENROUTER_TEXT_MODELS` and `OPENROUTER_MULTIMODAL_MODELS` with comma-separated fallback lists. Both default to `minimax/minimax-m3:free`. Configure `OPENROUTER_AUDIO_MODELS` separately for an audio-capable model.
@@ -130,6 +131,7 @@ The bot supports several configurable parameters that can be set via environment
 - If ElevenLabs is not configured, TTS options are omitted from slash commands.
 - Gemini text/chat and image-generation fallback models can be overridden with `GEMINI_TEXT_IMAGE_MODELS` and `GEMINI_IMAGE_MODELS`.
 - Mistral text/chat and `/ask` image-input fallback models can be overridden with `MISTRAL_TEXT_MODELS` and `MISTRAL_VISION_MODELS`.
-- Mistral `/imagine` requires `MISTRAL_IMAGE_AGENT_ID`; otherwise Mistral is treated as chat and vision-input only.
+- Ask/retry requests use `ASK_REQUEST_TIMEOUT_SECONDS` (default 180 seconds) across provider fallbacks; `MISTRAL_TIMEOUT_SECONDS` bounds each complete agent attempt (default 60 seconds). Long answers are split into Discord messages so citations survive.
+- Mistral `/imagine` retains its separate legacy Conversations API path and requires `MISTRAL_IMAGE_AGENT_ID`; otherwise Mistral is treated as chat and vision-input only.
 - OpenRouter uses its native async Python SDK. It accepts validated image, audio, and video payloads for models that advertise those modalities, and its dedicated image API backs `/imagine` when `OPENROUTER_IMAGE_MODELS` is configured.
 - `minimax/minimax-m3:free` currently advertises text, image, and video input with text output. It does not advertise audio input, despite the OpenRouter provider being able to encode audio for other compatible models.
