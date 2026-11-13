@@ -11,6 +11,41 @@ from unittest.mock import AsyncMock, patch
     "Pillow is required for Mistral provider image tests",
 )
 class MistralProviderTests(unittest.TestCase):
+    def test_default_models_stay_within_owner_allowlist(self):
+        import os
+        from llm_providers.mistral import MistralProvider, ALLOWED_MISTRAL_MODELS
+        expected = {"ministral-3b-latest", "ministral-8b-latest", "ministral-14b-latest",
+                    "open-mistral-nemo", "open-mistral-7b", "codestral-latest"}
+        with patch.dict(os.environ, {}, clear=True):
+            provider = MistralProvider("key")
+        self.assertEqual(ALLOWED_MISTRAL_MODELS, expected)
+        self.assertEqual(set(provider.text_models), expected)
+        self.assertEqual(provider.text_models[0], "ministral-14b-latest")
+        self.assertEqual(set(provider.vision_models), {"ministral-14b-latest", "ministral-8b-latest", "ministral-3b-latest"})
+        self.assertEqual(provider.search_model, "ministral-14b-latest")
+
+    def test_environment_overrides_cannot_select_disallowed_models(self):
+        import os
+        from llm_providers.mistral import MistralProvider
+        with patch.dict(os.environ, {
+            "MISTRAL_TEXT_MODELS": "mistral-medium-latest,ministral-8b-latest,ministral-8b-latest",
+            "MISTRAL_VISION_MODELS": "codestral-latest,mistral-large-latest,ministral-3b-latest",
+            "MISTRAL_SEARCH_MODEL": "mistral-medium-latest",
+        }, clear=True):
+            provider = MistralProvider("key")
+        self.assertEqual(provider.text_models, ["ministral-8b-latest"])
+        self.assertEqual(provider.vision_models, ["ministral-3b-latest"])
+        self.assertEqual(provider.search_model, "ministral-8b-latest")
+
+    def test_all_invalid_overrides_fall_back_to_allowed_models(self):
+        import os
+        from llm_providers.mistral import MistralProvider, ALLOWED_MISTRAL_MODELS
+        with patch.dict(os.environ, {"MISTRAL_SEARCH_MODEL": "mistral-large-latest"}, clear=True):
+            provider = MistralProvider("key", text_models=["mistral-medium-latest"], vision_models=["open-mistral-7b"])
+        self.assertEqual(set(provider.text_models), ALLOWED_MISTRAL_MODELS)
+        self.assertTrue(all(model in ALLOWED_MISTRAL_MODELS for model in provider.vision_models))
+        self.assertIn(provider.search_model, ALLOWED_MISTRAL_MODELS)
+
     def _run_with_sdk(self, question="question", media=None, search=False, fail_search=False, answer="verified answer"):
         from mistralai import agents
         from llm_providers.mistral import MistralProvider
@@ -50,7 +85,7 @@ class MistralProviderTests(unittest.TestCase):
         if fail_search:
             search_api.side_effect = RuntimeError("unavailable")
         with patch.dict(os.environ, {"MISTRAL_WEB_SEARCH_ENABLE": "true"}):
-            provider = MistralProvider("test-key", text_models=["mistral-test"], vision_models=["vision-test"])
+            provider = MistralProvider("test-key", text_models=["ministral-14b-latest"], vision_models=["ministral-8b-latest"])
         provider._client = SimpleNamespace(beta=SimpleNamespace(conversations=SimpleNamespace(start_async=search_api)))
         with patch.object(agents, "Agent", side_effect=make_agent):
             result = asyncio.run(provider.generate_response(question, "persona and memories", media))
@@ -93,7 +128,7 @@ class MistralProviderTests(unittest.TestCase):
     def test_agent_converts_validated_image_for_sdk(self):
         from PIL import Image
         _, captured, _, _ = self._run_with_sdk(media=[Image.new("RGB", (1, 1))])
-        self.assertEqual(captured["model"], "vision-test")
+        self.assertEqual(captured["model"], "ministral-8b-latest")
         self.assertEqual(captured["content"][1]["type"], "image")
         self.assertTrue(captured["content"][1]["uri"].startswith("data:image/jpeg;base64,"))
 
@@ -114,7 +149,7 @@ class MistralProviderTests(unittest.TestCase):
                 {"type": "tool_reference", "url": "https://example.com/official"},
             ],
         }]))
-        provider = MistralProvider("key", text_models=["test"])
+        provider = MistralProvider("key", text_models=["ministral-3b-latest"])
         provider._client = SimpleNamespace(beta=SimpleNamespace(conversations=SimpleNamespace(start_async=search_api)))
         with patch.object(agents, "Agent", side_effect=scripted_agent), patch(
             "httpx.AsyncClient.send", new=AsyncMock(side_effect=RuntimeError("network disabled in tests"))
@@ -157,13 +192,13 @@ class MistralProviderTests(unittest.TestCase):
                     delta = {"content": "The officially announced date is November 19."}
                     finish = "stop"
                 chunk = {"id": "test-completion", "object": "chat.completion.chunk", "created": 1,
-                    "model": "mistral-small-latest", "choices": [{"index": 0, "delta": delta, "finish_reason": finish}],
+                    "model": "ministral-8b-latest", "choices": [{"index": 0, "delta": delta, "finish_reason": finish}],
                     "usage": {"prompt_tokens": 10, "completion_tokens": 5, "total_tokens": 15}}
                 return httpx.Response(200, request=request, headers={"content-type": "text/event-stream"},
                     content="data: " + json.dumps(chunk) + "\n\ndata: [DONE]\n\n")
             if request.method == "GET" and request.url.path.startswith("/v1/models"):
                 return httpx.Response(200, request=request, json={
-                    "id": "mistral-small-latest", "max_context_length": 32768,
+                    "id": "ministral-8b-latest", "max_context_length": 32768,
                     "capabilities": {"completion_chat": True, "vision": True},
                 })
             if request.url.path == "/v1/datalake/events":
@@ -175,7 +210,7 @@ class MistralProviderTests(unittest.TestCase):
         ), patch("mistralai.vibe.harness.runtime.completion.providers.utils._BACKOFF_WAIT", return_value=0), patch(
             "mistralai.vibe.harness.runtime.completion.providers.utils._JITTER_WAIT", return_value=0
         ):
-            provider = MistralProvider("offline-key", text_models=["mistral-small-latest"])
+            provider = MistralProvider("offline-key", text_models=["ministral-8b-latest"])
             provider._client = SimpleNamespace(beta=SimpleNamespace(conversations=SimpleNamespace(start_async=search_api)))
             text, usage = asyncio.run(provider.generate_response("When is it released?", "Keep it concise."))
         self.assertIn("November 19", text)
@@ -202,7 +237,7 @@ class MistralProviderTests(unittest.TestCase):
             session = SimpleNamespace(run=AsyncMock(return_value=failure if not sessions else success), cancel=AsyncMock())
             sessions.append(session)
             return SimpleNamespace(start_session=AsyncMock(return_value=session))
-        provider = MistralProvider("key", text_models=["first", "second"])
+        provider = MistralProvider("key", text_models=["ministral-14b-latest", "ministral-8b-latest"])
         provider._client = SimpleNamespace()
         with patch.object(agents, "Agent", side_effect=make_agent), self.assertLogs("llm_providers.mistral", level="ERROR") as logs:
             text, _ = asyncio.run(provider.generate_response("q", "ctx"))
@@ -216,7 +251,7 @@ class MistralProviderTests(unittest.TestCase):
     def test_fallback_and_timeout_cancel_session(self):
         from mistralai import agents
         from llm_providers.mistral import MistralProvider
-        provider = MistralProvider("key", text_models=["first", "second"], timeout_seconds=0.02)
+        provider = MistralProvider("key", text_models=["ministral-14b-latest", "ministral-8b-latest"], timeout_seconds=0.02)
         provider._client = SimpleNamespace()
         sessions = []
 

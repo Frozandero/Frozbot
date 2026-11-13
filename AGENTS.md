@@ -82,6 +82,7 @@ Important optional environment:
 ## Coding Rules
 
 - Preserve the provider abstraction. New LLM backends should implement `LLMProvider`, be wired in `llm_providers/__init__.py`, and expose config in `config.env.example`.
+- Mistral model selection is restricted to the owner-approved `ministral-14b-latest`, `ministral-8b-latest`, `ministral-3b-latest`, `open-mistral-nemo`, `open-mistral-7b`, and `codestral-latest`. Text and search overrides must stay within this allowlist; vision uses only the three Ministral models. Ignore disallowed overrides with warnings and fall back to allowed defaults. Do not add models without owner authorization.
 - Provider loading is registry-based and lazy. Avoid top-level imports that make one provider's SDK mandatory for all other providers.
 - The Gemini provider uses `google-genai>=2.3.0` and the Interactions API (`client.interactions.create`) with `store=False`. Do not reintroduce deprecated `google-generativeai` or `models.generate_content` paths unless intentionally adding a compatibility layer.
 - Gemini text/chat and image-generation fallback models are configurable through `GEMINI_TEXT_IMAGE_MODELS` and `GEMINI_IMAGE_MODELS`; do not hard-code assumptions about the project's billing tier.

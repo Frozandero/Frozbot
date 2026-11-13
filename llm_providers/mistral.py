@@ -32,17 +32,35 @@ except ImportError:
 
 
 DEFAULT_MISTRAL_TEXT_MODELS = [
-    "mistral-medium-latest",
-    "mistral-small-latest",
     "ministral-14b-latest",
     "ministral-8b-latest",
+    "ministral-3b-latest",
+    "open-mistral-nemo",
+    "open-mistral-7b",
+    "codestral-latest",
 ]
+ALLOWED_MISTRAL_MODELS = frozenset(DEFAULT_MISTRAL_TEXT_MODELS)
+DEFAULT_MISTRAL_VISION_MODELS = DEFAULT_MISTRAL_TEXT_MODELS[:3]
 
 
 def _parse_model_list(raw_value: Optional[str], default_models: list[str]) -> list[str]:
     if not raw_value:
         return list(default_models)
     return [model.strip() for model in raw_value.split(",") if model.strip()]
+
+
+def _restrict_models(models, allowed_models, default_models, setting):
+    """Enforce the owner's model allowlist even for existing environment overrides."""
+    selected = []
+    for model in models:
+        model = model.strip()
+        if model not in allowed_models:
+            logger.warning("provider_model_not_allowed", extra={
+                "provider": "mistral", "model": model, "setting": setting,
+            })
+        elif model not in selected:
+            selected.append(model)
+    return selected or list(default_models)
 
 
 def _get_value(obj: object, key: str, default: Any = None) -> Any:
@@ -224,13 +242,15 @@ class MistralProvider(LLMProvider):
             timeout_seconds: Optional API timeout per model attempt.
         """
         self.api_key = api_key
-        self.text_models = text_models or _parse_model_list(
-            os.getenv("MISTRAL_TEXT_MODELS"),
-            DEFAULT_MISTRAL_TEXT_MODELS,
+        self.text_models = _restrict_models(
+            text_models or _parse_model_list(os.getenv("MISTRAL_TEXT_MODELS"), DEFAULT_MISTRAL_TEXT_MODELS),
+            ALLOWED_MISTRAL_MODELS, DEFAULT_MISTRAL_TEXT_MODELS, "MISTRAL_TEXT_MODELS",
         )
-        self.vision_models = vision_models or _parse_model_list(
-            os.getenv("MISTRAL_VISION_MODELS"),
-            self.text_models,
+        default_vision_models = [model for model in self.text_models if model in DEFAULT_MISTRAL_VISION_MODELS]
+        default_vision_models = default_vision_models or DEFAULT_MISTRAL_VISION_MODELS
+        self.vision_models = _restrict_models(
+            vision_models or _parse_model_list(os.getenv("MISTRAL_VISION_MODELS"), default_vision_models),
+            DEFAULT_MISTRAL_VISION_MODELS, default_vision_models, "MISTRAL_VISION_MODELS",
         )
         self.image_agent_id = (
             image_agent_id
@@ -241,7 +261,10 @@ class MistralProvider(LLMProvider):
             os.getenv("MISTRAL_TIMEOUT_SECONDS", "60")
         )
         self.web_search_enabled = os.getenv("MISTRAL_WEB_SEARCH_ENABLE", "true").lower() == "true"
-        self.search_model = os.getenv("MISTRAL_SEARCH_MODEL", self.text_models[0])
+        self.search_model = _restrict_models(
+            [os.getenv("MISTRAL_SEARCH_MODEL", self.text_models[0])],
+            ALLOWED_MISTRAL_MODELS, [self.text_models[0]], "MISTRAL_SEARCH_MODEL",
+        )[0]
         self._client: Optional[object] = None
 
     def _get_client(self):
