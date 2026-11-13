@@ -283,14 +283,62 @@ class MistralProviderTests(unittest.TestCase):
         for session in sessions:
             session.cancel.assert_awaited_once()
 
-    def test_summaries_disable_search(self):
+    def test_summary_uses_small_model_without_agent_or_search(self):
         from llm_providers.mistral import MistralProvider
-        from llm_providers.base import TokenUsage
+        from mistralai import agents
+        complete = AsyncMock(return_value=SimpleNamespace(
+            choices=[SimpleNamespace(message=SimpleNamespace(content="summary"))],
+            usage=SimpleNamespace(prompt_tokens=10, completion_tokens=4)))
         provider = MistralProvider("key")
-        provider._client = SimpleNamespace()
-        provider.generate_response = AsyncMock(return_value=("summary", TokenUsage()))
-        asyncio.run(provider.summarize_messages("messages"))
-        self.assertFalse(provider.generate_response.call_args.kwargs["allow_search"])
+        provider._client = SimpleNamespace(chat=SimpleNamespace(complete_async=complete))
+        with patch.object(agents, "Agent") as agent:
+            text, usage = asyncio.run(provider.summarize_messages("messages"))
+        agent.assert_not_called()
+        self.assertEqual(text, "summary")
+        self.assertEqual(usage.total_tokens, 14)
+        self.assertEqual(complete.call_args.kwargs["model"], "ministral-3b-latest")
+        self.assertEqual(complete.call_args.kwargs["max_tokens"], 160)
+        self.assertNotIn("tools", complete.call_args.kwargs)
+
+    def test_summary_failure_is_best_effort_without_expensive_fallback(self):
+        from llm_providers.mistral import MistralProvider
+        complete = AsyncMock(side_effect=RuntimeError("unavailable"))
+        provider = MistralProvider("key", text_models=["ministral-14b-latest", "ministral-8b-latest"])
+        provider._client = SimpleNamespace(chat=SimpleNamespace(complete_async=complete))
+        text, _ = asyncio.run(provider.summarize_messages("messages"))
+        self.assertIsNone(text)
+        complete.assert_awaited_once()
+        self.assertEqual(complete.call_args.kwargs["model"], "ministral-8b-latest")
+
+    def test_model_fallback_reuses_search_without_second_hosted_call(self):
+        from mistralai import agents
+        from llm_providers.mistral import MistralProvider
+        search_api = AsyncMock(return_value={"outputs": [{"type": "message.output", "content": [
+            {"type": "text", "text": "Official release announcement"},
+            {"type": "tool_reference", "url": "https://example.com/official"},
+        ]}]})
+        attempts = []
+        evidence = []
+        def make_agent(**kwargs):
+            attempt = len(attempts)
+            attempts.append(kwargs)
+            async def run(content):
+                evidence.append(await kwargs["tools"][0](query="official release date"))
+                if attempt == 0:
+                    return agents.Failed(session_id="s", turn_id="t", cursor="c", text=None,
+                        error=agents.ProtocolError(message="limited", code="completion_rate_limited", retryable=True))
+                return agents.Completed(session_id="s2", turn_id="t2", cursor="c2", text="answer", output="answer")
+            return SimpleNamespace(start_session=AsyncMock(return_value=SimpleNamespace(run=run, cancel=AsyncMock())))
+        provider = MistralProvider("key", text_models=["ministral-14b-latest", "ministral-8b-latest"])
+        provider._client = SimpleNamespace(beta=SimpleNamespace(conversations=SimpleNamespace(start_async=search_api)))
+        with patch.object(agents, "Agent", side_effect=make_agent):
+            text, _ = asyncio.run(provider.generate_response("release date?", "persona"))
+        self.assertEqual(text, "answer")
+        search_api.assert_awaited_once()
+        self.assertEqual(evidence[0], evidence[1])
+        self.assertIn("Official release announcement", attempts[1]["instructions"])
+        self.assertIn("UNTRUSTED WEB EVIDENCE", attempts[1]["instructions"])
+        self.assertEqual(attempts[0]["completion"]["retry"]["max_attempts"], 3)
 
     def test_generate_image_uses_configured_agent_and_downloads_file(self):
         from llm_providers.mistral import MistralProvider
