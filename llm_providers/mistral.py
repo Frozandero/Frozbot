@@ -41,6 +41,9 @@ DEFAULT_MISTRAL_TEXT_MODELS = [
 ]
 ALLOWED_MISTRAL_MODELS = frozenset(DEFAULT_MISTRAL_TEXT_MODELS)
 DEFAULT_MISTRAL_VISION_MODELS = DEFAULT_MISTRAL_TEXT_MODELS[:3]
+# Owner-approved exception: hosted connectors reject the Ministral chat models.
+DEFAULT_MISTRAL_SEARCH_MODEL = "mistral-medium-latest"
+ALLOWED_MISTRAL_SEARCH_MODELS = frozenset({DEFAULT_MISTRAL_SEARCH_MODEL})
 
 
 def _parse_model_list(raw_value: Optional[str], default_models: list[str]) -> list[str]:
@@ -262,8 +265,8 @@ class MistralProvider(LLMProvider):
         )
         self.web_search_enabled = os.getenv("MISTRAL_WEB_SEARCH_ENABLE", "true").lower() == "true"
         self.search_model = _restrict_models(
-            [os.getenv("MISTRAL_SEARCH_MODEL", self.text_models[0])],
-            ALLOWED_MISTRAL_MODELS, [self.text_models[0]], "MISTRAL_SEARCH_MODEL",
+            [os.getenv("MISTRAL_SEARCH_MODEL", DEFAULT_MISTRAL_SEARCH_MODEL)],
+            ALLOWED_MISTRAL_SEARCH_MODELS, [DEFAULT_MISTRAL_SEARCH_MODEL], "MISTRAL_SEARCH_MODEL",
         )[0]
         self._client: Optional[object] = None
 
@@ -305,6 +308,7 @@ class MistralProvider(LLMProvider):
         usage = TokenUsage()
         sources = []
         search_calls = 0
+        search_successes = 0
         client = self._get_client()
 
         def track_usage(invocation):
@@ -314,7 +318,7 @@ class MistralProvider(LLMProvider):
 
         async def search(query: str) -> str:
             """Search the web for current facts. Use a focused query without private Discord context."""
-            nonlocal search_calls
+            nonlocal search_calls, search_successes
             if search_calls >= 3:
                 return "Search limit reached. Use existing evidence or say you cannot verify."
             search_calls += 1
@@ -337,16 +341,21 @@ class MistralProvider(LLMProvider):
                 usage.input_tokens += tokens.input_tokens
                 usage.output_tokens += tokens.output_tokens
                 evidence, urls = _search_evidence(response)
+                if evidence:
+                    search_successes += 1
                 for url in urls:
                     if url not in sources:
                         sources.append(url)
                 return evidence + "\nSources:\n" + "\n".join(urls) if evidence else (
                     "Search returned no evidence. Say you cannot verify current information."
                 )
-            except Exception:
+            except Exception as exc:
                 logger.warning("provider_web_search_failed", extra={
                     "request_id": request_id, "provider": self.provider_name,
                     "model": self.search_model,
+                    "status_code": _get_value(exc, "status_code"),
+                    "error_type": type(exc).__name__,
+                    "error_message": str(exc)[:500],
                 })
                 return "Search failed. Say current information could not be verified; do not guess."
 
@@ -399,7 +408,8 @@ class MistralProvider(LLMProvider):
                 usage_callback.reset(usage_token)
         logger.info("provider_agent_completed", extra={
             "request_id": request_id, "provider": self.provider_name, "model": model,
-            "search_used": search_calls > 0, "search_calls": search_calls, "source_count": len(sources),
+            "search_used": search_successes > 0, "search_calls": search_calls,
+            "search_successes": search_successes, "source_count": len(sources),
         })
         return text, usage
 

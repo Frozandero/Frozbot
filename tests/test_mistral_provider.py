@@ -22,7 +22,7 @@ class MistralProviderTests(unittest.TestCase):
         self.assertEqual(set(provider.text_models), expected)
         self.assertEqual(provider.text_models[0], "ministral-14b-latest")
         self.assertEqual(set(provider.vision_models), {"ministral-14b-latest", "ministral-8b-latest", "ministral-3b-latest"})
-        self.assertEqual(provider.search_model, "ministral-14b-latest")
+        self.assertEqual(provider.search_model, "mistral-medium-latest")
 
     def test_environment_overrides_cannot_select_disallowed_models(self):
         import os
@@ -30,12 +30,12 @@ class MistralProviderTests(unittest.TestCase):
         with patch.dict(os.environ, {
             "MISTRAL_TEXT_MODELS": "mistral-medium-latest,ministral-8b-latest,ministral-8b-latest",
             "MISTRAL_VISION_MODELS": "codestral-latest,mistral-large-latest,ministral-3b-latest",
-            "MISTRAL_SEARCH_MODEL": "mistral-medium-latest",
+            "MISTRAL_SEARCH_MODEL": "ministral-14b-latest",
         }, clear=True):
             provider = MistralProvider("key")
         self.assertEqual(provider.text_models, ["ministral-8b-latest"])
         self.assertEqual(provider.vision_models, ["ministral-3b-latest"])
-        self.assertEqual(provider.search_model, "ministral-8b-latest")
+        self.assertEqual(provider.search_model, "mistral-medium-latest")
 
     def test_all_invalid_overrides_fall_back_to_allowed_models(self):
         import os
@@ -44,7 +44,9 @@ class MistralProviderTests(unittest.TestCase):
             provider = MistralProvider("key", text_models=["mistral-medium-latest"], vision_models=["open-mistral-7b"])
         self.assertEqual(set(provider.text_models), ALLOWED_MISTRAL_MODELS)
         self.assertTrue(all(model in ALLOWED_MISTRAL_MODELS for model in provider.vision_models))
-        self.assertIn(provider.search_model, ALLOWED_MISTRAL_MODELS)
+        self.assertEqual(provider.search_model, "mistral-medium-latest")
+        self.assertNotIn(provider.search_model, provider.text_models)
+        self.assertNotIn(provider.search_model, provider.vision_models)
 
     def _run_with_sdk(self, question="question", media=None, search=False, fail_search=False, answer="verified answer"):
         from mistralai import agents
@@ -83,7 +85,9 @@ class MistralProviderTests(unittest.TestCase):
             ])], usage=SimpleNamespace(prompt_tokens=5, completion_tokens=3))
         search_api = AsyncMock(return_value=response)
         if fail_search:
-            search_api.side_effect = RuntimeError("unavailable")
+            class SearchRejected(RuntimeError):
+                status_code = 400
+            search_api.side_effect = SearchRejected("hosted search rejected")
         with patch.dict(os.environ, {"MISTRAL_WEB_SEARCH_ENABLE": "true"}):
             provider = MistralProvider("test-key", text_models=["ministral-14b-latest"], vision_models=["ministral-8b-latest"])
         provider._client = SimpleNamespace(beta=SimpleNamespace(conversations=SimpleNamespace(start_async=search_api)))
@@ -103,6 +107,7 @@ class MistralProviderTests(unittest.TestCase):
         self.assertEqual((usage.input_tokens, usage.output_tokens), (16, 10))
         self.assertFalse(search_api.call_args.kwargs["store"])
         self.assertEqual(search_api.call_args.kwargs["tools"], [{"type": "web_search"}])
+        self.assertEqual(search_api.call_args.kwargs["model"], "mistral-medium-latest")
         session.cancel.assert_awaited_once()
 
     def test_explicit_source_request_keeps_selected_model_citation(self):
@@ -121,7 +126,15 @@ class MistralProviderTests(unittest.TestCase):
         search_api.assert_not_awaited()
 
     def test_search_failure_returns_explicit_uncertainty_to_agent(self):
-        _, captured, _, _ = self._run_with_sdk(search=True, fail_search=True)
+        with self.assertLogs("llm_providers.mistral", level="INFO") as logs:
+            _, captured, _, _ = self._run_with_sdk(search=True, fail_search=True)
+        error = next(record for record in logs.records if record.msg == "provider_web_search_failed")
+        self.assertEqual(error.status_code, 400)
+        self.assertEqual(error.error_message, "hosted search rejected")
+        completed = next(record for record in logs.records if record.msg == "provider_agent_completed")
+        self.assertFalse(completed.search_used)
+        self.assertEqual(completed.search_calls, 1)
+        self.assertEqual(completed.search_successes, 0)
         self.assertIn("could not be verified", captured["evidence"])
         self.assertIn("do not guess", captured["evidence"])
 
