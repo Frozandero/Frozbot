@@ -114,6 +114,92 @@ class MistralProviderTests(unittest.TestCase):
         search_api.assert_awaited_once()
         self.assertIsNone(search_callback.get())
 
+    def test_http_rate_limit_after_search_retries_without_repeating_search(self):
+        import json
+        import os
+        import httpx
+        from llm_providers.mistral import MistralProvider
+        from llm_providers.mistral_tools import search_callback, usage_callback
+
+        completion_payloads = []
+        search_api = AsyncMock(return_value=SimpleNamespace(outputs=[{
+            "type": "message.output", "content": [
+                {"type": "text", "text": "Official announcement says the date is November 19."},
+                {"type": "tool_reference", "url": "https://example.com/official"},
+            ],
+        }]))
+
+        async def send(request, **kwargs):
+            if request.url.path == "/v1/chat/completions":
+                completion_payloads.append(json.loads(request.content))
+                if len(completion_payloads) == 2:
+                    return httpx.Response(429, request=request, json={
+                        "object": "error", "message": "Rate limit exceeded",
+                        "type": "rate_limited", "code": "1300",
+                    })
+                if len(completion_payloads) == 1:
+                    delta = {"tool_calls": [{"index": 0, "id": "search-call", "type": "function",
+                        "function": {"name": "web_search", "arguments": json.dumps({"query": "official release date"})}}]}
+                    finish = "tool_calls"
+                else:
+                    delta = {"content": "The officially announced date is November 19."}
+                    finish = "stop"
+                chunk = {"id": "test-completion", "object": "chat.completion.chunk", "created": 1,
+                    "model": "mistral-small-latest", "choices": [{"index": 0, "delta": delta, "finish_reason": finish}],
+                    "usage": {"prompt_tokens": 10, "completion_tokens": 5, "total_tokens": 15}}
+                return httpx.Response(200, request=request, headers={"content-type": "text/event-stream"},
+                    content="data: " + json.dumps(chunk) + "\n\ndata: [DONE]\n\n")
+            if request.method == "GET" and request.url.path.startswith("/v1/models"):
+                return httpx.Response(200, request=request, json={
+                    "id": "mistral-small-latest", "max_context_length": 32768,
+                    "capabilities": {"completion_chat": True, "vision": True},
+                })
+            if request.url.path == "/v1/datalake/events":
+                return httpx.Response(201, request=request, json={})
+            raise AssertionError("Unexpected network request in offline test: " + str(request.url))
+
+        with patch.dict(os.environ, {"MISTRAL_API_KEY": "offline-key", "MISTRAL_WEB_SEARCH_ENABLE": "true"}), patch(
+            "httpx.AsyncClient.send", new=AsyncMock(side_effect=send)
+        ), patch("mistralai.vibe.harness.runtime.completion.providers.utils._BACKOFF_WAIT", return_value=0), patch(
+            "mistralai.vibe.harness.runtime.completion.providers.utils._JITTER_WAIT", return_value=0
+        ):
+            provider = MistralProvider("offline-key", text_models=["mistral-small-latest"])
+            provider._client = SimpleNamespace(beta=SimpleNamespace(conversations=SimpleNamespace(start_async=search_api)))
+            text, usage = asyncio.run(provider.generate_response("When is it released?", "Keep it concise."))
+        self.assertIn("November 19", text)
+        self.assertIn("https://example.com/official", text)
+        self.assertEqual(len(completion_payloads), 3)
+        self.assertEqual(completion_payloads[1], completion_payloads[2])
+        search_api.assert_awaited_once()
+        self.assertEqual((usage.input_tokens, usage.output_tokens), (20, 10))
+        self.assertIsNone(search_callback.get())
+        self.assertIsNone(usage_callback.get())
+
+    def test_failed_sdk_turn_logs_error_and_falls_back(self):
+        from mistralai import agents
+        from llm_providers.mistral import MistralProvider
+
+        failure = agents.Failed(
+            session_id="s", turn_id="t", cursor="c", text=None,
+            error=agents.ProtocolError(message="Rate limit exceeded", code="completion_rate_limited", retryable=True),
+        )
+        success = agents.Completed(session_id="s2", turn_id="t2", cursor="c2", text="fallback answer", output="fallback answer")
+        sessions = []
+        def make_agent(**kwargs):
+            session = SimpleNamespace(run=AsyncMock(return_value=failure if not sessions else success), cancel=AsyncMock())
+            sessions.append(session)
+            return SimpleNamespace(start_session=AsyncMock(return_value=session))
+        provider = MistralProvider("key", text_models=["first", "second"])
+        provider._client = SimpleNamespace()
+        with patch.object(agents, "Agent", side_effect=make_agent), self.assertLogs("llm_providers.mistral", level="ERROR") as logs:
+            text, _ = asyncio.run(provider.generate_response("q", "ctx"))
+        self.assertEqual(text, "fallback answer")
+        record = next(record for record in logs.records if record.msg == "provider_model_failed")
+        self.assertEqual(record.error_code, "completion_rate_limited")
+        self.assertTrue(record.retryable)
+        for session in sessions:
+            session.cancel.assert_awaited_once()
+
     def test_fallback_and_timeout_cancel_session(self):
         from mistralai import agents
         from llm_providers.mistral import MistralProvider

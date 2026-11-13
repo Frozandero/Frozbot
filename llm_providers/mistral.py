@@ -189,6 +189,17 @@ def _is_retryable_mistral_error(exc: BaseException) -> bool:
     return status_code in {500, 502, 503, 504}
 
 
+class _MistralAgentError(RuntimeError):
+    """Expose SDK failed-turn records to the provider's error/fallback handling."""
+
+    def __init__(self, error):
+        self.error_code = _get_value(error, "code")
+        self.retryable = _get_value(error, "retryable", False)
+        details = _get_value(error, "details") or {}
+        self.status_code = _get_value(details, "status_code")
+        super().__init__(_get_value(error, "message", "Mistral agent failed"))
+
+
 class MistralProvider(LLMProvider):
     """Mistral AI provider implementation."""
 
@@ -331,7 +342,8 @@ class MistralProvider(LLMProvider):
         agent = agents.Agent(
             model=model, name="frozbot", instructions=instructions, temperature=0.9,
             completion={"type": "mistral", "model": model, "api_key_env_var": "MISTRAL_API_KEY",
-                        "api_timeout": self.timeout_seconds, "retry": {"max_attempts": 1}},
+                        "api_timeout": self.timeout_seconds,
+                        "retry": {"max_attempts": 5, "retry_after_max_wait_seconds": 10}},
             tools=[web_search] if allow_search else [], hooks=[UsageHook()], max_iterations=6,
             builtins=agents.Builtins.none(),
         )
@@ -349,6 +361,8 @@ class MistralProvider(LLMProvider):
         try:
             session = await agent.start_session()
             result = await session.run(content)
+            if isinstance(result, agents.Failed):
+                raise _MistralAgentError(result.error)
             text = result.text if isinstance(result, agents.Completed) and not result.stop_reason else None
         finally:
             try:
@@ -471,6 +485,8 @@ class MistralProvider(LLMProvider):
                         "model": model_name,
                         "status_code": status_code,
                         "error_type": type(e).__name__,
+                        "error_code": _get_value(e, "error_code"),
+                        "retryable": _get_value(e, "retryable", False),
                         "error_message": str(e)[:200],
                     },
                     exc_info=True,

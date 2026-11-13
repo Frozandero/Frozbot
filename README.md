@@ -131,6 +131,7 @@ The bot supports several configurable parameters that can be set via environment
 - If ElevenLabs is not configured, TTS options are omitted from slash commands.
 - Gemini text/chat and image-generation fallback models can be overridden with `GEMINI_TEXT_IMAGE_MODELS` and `GEMINI_IMAGE_MODELS`.
 - Mistral text/chat and `/ask` image-input fallback models can be overridden with `MISTRAL_TEXT_MODELS` and `MISTRAL_VISION_MODELS`.
+- Mistral agent completions retry transient errors (including HTTP 429) up to five attempts per model call, with exponential backoff and a 10-second cap on each Retry-After wait. The existing per-model and overall request deadlines still apply. Retries keep the current session and search results; SDK failed-turn records are logged with their error codes before model fallback.
 - Ask/retry requests use `ASK_REQUEST_TIMEOUT_SECONDS` (default 180 seconds) across provider fallbacks; `MISTRAL_TIMEOUT_SECONDS` bounds each complete agent attempt (default 60 seconds). Long answers are split into Discord messages so citations survive.
 - Mistral `/imagine` retains its separate legacy Conversations API path and requires `MISTRAL_IMAGE_AGENT_ID`; otherwise Mistral is treated as chat and vision-input only.
 - OpenRouter uses its native async Python SDK. It accepts validated image, audio, and video payloads for models that advertise those modalities, and its dedicated image API backs `/imagine` when `OPENROUTER_IMAGE_MODELS` is configured.
