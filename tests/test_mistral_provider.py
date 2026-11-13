@@ -11,15 +11,15 @@ from unittest.mock import AsyncMock, patch
     "Pillow is required for Mistral provider image tests",
 )
 class MistralProviderTests(unittest.TestCase):
-    def _run_with_sdk(self, question="question", media=None, search=False, fail_search=False):
+    def _run_with_sdk(self, question="question", media=None, search=False, fail_search=False, answer="verified answer"):
         from mistralai import agents
         from llm_providers.mistral import MistralProvider
         import os
 
         captured = {}
         completed = agents.Completed(
-            session_id="session", turn_id="turn", cursor="cursor", text="verified answer",
-            output="verified answer",
+            session_id="session", turn_id="turn", cursor="cursor", text=answer,
+            output=answer,
         )
         session = SimpleNamespace(cancel=AsyncMock())
 
@@ -56,9 +56,12 @@ class MistralProviderTests(unittest.TestCase):
             result = asyncio.run(provider.generate_response(question, "persona and memories", media))
         return result, captured, session, search_api
 
-    def test_agent_search_preserves_context_citations_and_aggregates_usage(self):
+    def test_agent_search_keeps_evidence_internal_and_aggregates_usage(self):
         (text, usage), captured, session, search_api = self._run_with_sdk(search=True)
-        self.assertIn("https://example.com/announcement", text)
+        self.assertEqual(text, "verified answer")
+        self.assertIn("https://example.com/announcement", captured["evidence"])
+        self.assertIn("unless the user explicitly asks", captured["instructions"])
+        self.assertNotIn("Cite supporting source URLs in your answer", captured["instructions"])
         self.assertIn("Official announcement", captured["evidence"])
         self.assertIn("persona and memories", captured["instructions"])
         self.assertIn("release dates", captured["instructions"])
@@ -66,6 +69,14 @@ class MistralProviderTests(unittest.TestCase):
         self.assertFalse(search_api.call_args.kwargs["store"])
         self.assertEqual(search_api.call_args.kwargs["tools"], [{"type": "web_search"}])
         session.cancel.assert_awaited_once()
+
+    def test_explicit_source_request_keeps_selected_model_citation(self):
+        answer = "November 19. [Official announcement](https://example.com/announcement)"
+        (text, _), captured, _, _ = self._run_with_sdk(
+            question="When is it released? Include a source link.", search=True, answer=answer,
+        )
+        self.assertEqual(text, answer)
+        self.assertIn("one or two supporting links", captured["instructions"])
 
     def test_casual_chat_does_not_force_search(self):
         (text, usage), captured, session, search_api = self._run_with_sdk()
@@ -109,7 +120,8 @@ class MistralProviderTests(unittest.TestCase):
             "httpx.AsyncClient.send", new=AsyncMock(side_effect=RuntimeError("network disabled in tests"))
         ):
             text, _ = asyncio.run(provider.generate_response("When is the game out?", "persona"))
-        self.assertIn("https://example.com/official", text)
+        self.assertNotIn("https://example.com/official", text)
+        self.assertNotIn("Sources:", text)
         model.assert_consumed()
         search_api.assert_awaited_once()
         self.assertIsNone(search_callback.get())
@@ -167,7 +179,8 @@ class MistralProviderTests(unittest.TestCase):
             provider._client = SimpleNamespace(beta=SimpleNamespace(conversations=SimpleNamespace(start_async=search_api)))
             text, usage = asyncio.run(provider.generate_response("When is it released?", "Keep it concise."))
         self.assertIn("November 19", text)
-        self.assertIn("https://example.com/official", text)
+        self.assertNotIn("https://example.com/official", text)
+        self.assertNotIn("Sources:", text)
         self.assertEqual(len(completion_payloads), 3)
         self.assertEqual(completion_payloads[1], completion_payloads[2])
         search_api.assert_awaited_once()
